@@ -72,8 +72,8 @@ The card provides:
 - Live camera stream with loading indicator
 - Temperature & humidity overlays
 - Motion & sound activity indicators
-- Night light slider (drag to adjust brightness, 0% = off)
-- Sound machine controls with icon-based track selection
+- Night light slider (drag to adjust brightness, 0% = off; can be hidden in card settings)
+- Sound machine controls with icon-based track selection (can be hidden in card settings)
 - Volume slider
 - Network info popup (WiFi name, frequency, signal strength)
 

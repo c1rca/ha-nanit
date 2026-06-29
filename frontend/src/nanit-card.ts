@@ -339,8 +339,10 @@ export class NanitCard extends LitElement {
   }
 
   private _renderControls(entities: NanitEntities): TemplateResult {
-    const hasNightLight = isEntityAvailable(this.hass, entities.night_light);
-    const hasSoundMachine = isEntityAvailable(this.hass, entities.sound_machine);
+    const hasNightLight = !this._config.hide_night_light
+      && isEntityAvailable(this.hass, entities.night_light);
+    const hasSoundMachine = !this._config.hide_sound_machine
+      && isEntityAvailable(this.hass, entities.sound_machine);
     if (!hasNightLight && !hasSoundMachine) return html``;
 
     return html`

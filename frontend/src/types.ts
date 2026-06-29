@@ -27,6 +27,8 @@ export interface HassEntityRegistryEntry {
 export interface NanitCardConfig {
   type: string;
   camera_entity_id?: string;
+  hide_night_light?: boolean;
+  hide_sound_machine?: boolean;
 }
 
 export interface NanitEntities {
