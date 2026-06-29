@@ -12,6 +12,7 @@ from custom_components.nanit.frontend import (
     _CARD_URL,
     _MANIFEST_VERSION,
     _REGISTERED_KEY,
+    _card_resource_version,
     async_register_card,
 )
 
@@ -88,7 +89,7 @@ async def test_register_card_updates_existing_resource(hass: HomeAssistant) -> N
 
 
 async def test_register_card_skips_update_when_url_matches(hass: HomeAssistant) -> None:
-    current_url = f"{_CARD_URL}?v={_MANIFEST_VERSION}"
+    current_url = f"{_CARD_URL}?v={_card_resource_version()}"
     resources = _mock_resources([{"id": "res1", "url": current_url}])
     _setup_hass_for_card(hass, resources)
 
