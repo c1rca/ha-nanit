@@ -264,12 +264,21 @@ class NanitCamera:
         return status
 
     async def async_get_settings(self) -> SettingsState:
-        """GET_SETTINGS request."""
+        """GET_SETTINGS request.
+
+        Some Nanit firmware omits the optional proto2 ``sleep_mode`` field
+        when the camera is awake because ``False`` is the protobuf default.
+        For a full GET_SETTINGS response, absence therefore means camera-on;
+        partial push updates still preserve ``None`` so omitted fields do not
+        overwrite known state.
+        """
         resp = await self._send_request(
             RequestType.GET_SETTINGS,
             get_settings=GetSettings(all=True),
         )
         settings = _parse_settings(resp)
+        if resp.HasField("settings") and not resp.settings.HasField("sleep_mode"):
+            settings = dataclasses.replace(settings, sleep_mode=False)
         self._update_state(settings=settings, kind=CameraEventKind.SETTINGS_UPDATE)
         return settings
 
