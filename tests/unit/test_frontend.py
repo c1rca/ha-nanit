@@ -88,6 +88,22 @@ async def test_register_card_updates_existing_resource(hass: HomeAssistant) -> N
     resources.async_update_item.assert_awaited_once()
 
 
+async def test_register_card_calculates_version_in_executor(hass: HomeAssistant) -> None:
+    resources = _mock_resources()
+    _setup_hass_for_card(hass, resources)
+
+    with patch.object(
+        hass, "async_add_executor_job", AsyncMock(return_value="executor-version")
+    ) as executor:
+        with patch(f"{_FRONTEND_MODULE}._CARD_DIR", Path(__file__).parent):
+            with patch(f"{_FRONTEND_MODULE}._CARD_FILENAME", "conftest.py"):
+                await async_register_card(hass)
+
+    executor.assert_awaited_once()
+    call_args = resources.async_create_item.call_args[0][0]
+    assert call_args["url"] == f"{_CARD_URL}?v=executor-version"
+
+
 async def test_register_card_skips_update_when_url_matches(hass: HomeAssistant) -> None:
     with patch(f"{_FRONTEND_MODULE}._CARD_DIR", Path(__file__).parent):
         with patch(f"{_FRONTEND_MODULE}._CARD_FILENAME", "conftest.py"):

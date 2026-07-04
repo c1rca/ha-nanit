@@ -81,7 +81,8 @@ async def async_register_card(hass: HomeAssistant) -> None:
         _LOGGER.debug("Lovelace in YAML mode — skipping automatic card resource registration")
         return
 
-    resource_url = f"{_CARD_URL}?v={_card_resource_version()}"
+    resource_version = await hass.async_add_executor_job(_card_resource_version)
+    resource_url = f"{_CARD_URL}?v={resource_version}"
     resources = cast(ResourceStorageCollection, lovelace_data.resources)
 
     if not resources.loaded:
