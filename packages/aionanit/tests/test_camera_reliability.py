@@ -190,6 +190,33 @@ async def test_background_playback_poll_timeout_does_not_force_reconnect() -> No
 
 
 @pytest.mark.asyncio
+async def test_recover_connection_forces_local_first_reconnect_even_when_fresh() -> None:
+    camera, token_manager = _make_camera()
+    camera._prefer_local = True
+    camera._local_ip = "192.0.2.10"
+
+    transport = MagicMock()
+    transport.connected = True
+    transport.idle_seconds = 1.0
+    transport.transport_kind = TransportKind.CLOUD
+    transport.async_connect_local = AsyncMock()
+    transport.async_connect_cloud = AsyncMock()
+    camera._transport = transport
+    camera._async_enable_sensor_push = AsyncMock()
+    camera._start_local_probe = MagicMock()
+    camera._start_sensor_poll = MagicMock()
+    camera._start_playback_poll = MagicMock()
+    camera._start_token_refresh = MagicMock()
+
+    await camera.async_recover_connection()
+
+    token_manager.async_get_access_token.assert_awaited_once()
+    transport.async_connect_local.assert_awaited_once_with("192.0.2.10", "test_token")
+    transport.async_connect_cloud.assert_not_awaited()
+    camera._async_enable_sensor_push.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_reconnect_completes_with_unresponsive_camera() -> None:
     """_async_reconnect must not deadlock when the camera never responds.
 

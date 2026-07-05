@@ -181,11 +181,29 @@ class NanitCameraEntity(NanitEntity, Camera):
                     await asyncio.sleep(_STREAM_RETRY_DELAY)
                 else:
                     _LOGGER.warning(
-                        "PUT_STREAMING failed after %d attempts for camera %s",
+                        "PUT_STREAMING failed after %d attempts for camera %s; recovering connection",
                         _STREAM_START_ATTEMPTS,
                         self._camera.uid,
                         exc_info=True,
                     )
+                    try:
+                        await self._camera.async_recover_connection()
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.debug(
+                            "Connection recovery failed before final PUT_STREAMING retry for %s",
+                            self._camera.uid,
+                            exc_info=True,
+                        )
+                        return False
+                    try:
+                        await self._camera.async_start_streaming()
+                        return True
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "PUT_STREAMING final retry failed for camera %s",
+                            self._camera.uid,
+                            exc_info=True,
+                        )
         return False
 
     # ------------------------------------------------------------------
