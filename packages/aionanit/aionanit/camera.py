@@ -900,11 +900,20 @@ class NanitCamera:
             self._local_probe_task.cancel()
         self._local_probe_task = None
 
+    async def async_recover_connection(self) -> None:
+        """Force a local-first connection refresh and re-enable camera session state.
+
+        This is intended for higher-level integrations that detect a stalled
+        stream or repeated control failures and want the same recovery effect as
+        a small integration reload without waiting for the periodic local probe.
+        """
+        await self._async_reconnect(force=True)
+
     # ------------------------------------------------------------------
     # Internal — inline reconnect
     # ------------------------------------------------------------------
 
-    async def _async_reconnect(self) -> None:
+    async def _async_reconnect(self, *, force: bool = False) -> None:
         """Close and re-establish the WebSocket connection inline.
 
         Used by ``_send_request`` to transparently recover from stale or
@@ -929,7 +938,8 @@ class NanitCamera:
         async with self._reconnect_lock:
             # Skip if another caller already reconnected.
             if (
-                self._transport.connected
+                not force
+                and self._transport.connected
                 and self._transport.idle_seconds < _FRESH_CONNECTION_WINDOW
             ):
                 _LOGGER.debug(

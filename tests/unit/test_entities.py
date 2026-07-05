@@ -746,3 +746,18 @@ async def test_camera_rearm_skips_when_stream_gone() -> None:
     await entity._async_rearm_stream()
 
     camera.async_start_streaming.assert_not_awaited()
+
+
+async def test_camera_start_streaming_recovers_connection_before_final_retry() -> None:
+    coordinator = _push_coordinator(_camera_state())
+    camera = MagicMock(uid="cam_1")
+    camera.async_start_streaming = AsyncMock(side_effect=[Exception("timeout"), None])
+    camera.async_recover_connection = AsyncMock()
+    entity = NanitCameraEntity(coordinator, camera)
+    _disable_state_writes(entity)
+
+    with patch("custom_components.nanit.camera._STREAM_START_ATTEMPTS", 1):
+        assert await entity._async_start_streaming_safe()
+
+    camera.async_recover_connection.assert_awaited_once()
+    assert camera.async_start_streaming.await_count == 2
