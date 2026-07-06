@@ -62,7 +62,11 @@ async def async_register_card(hass: HomeAssistant) -> None:
         _LOGGER.debug("Lovelace in YAML mode — skipping automatic card resource registration")
         return
 
-    resource_url = _CARD_URL
+    # Version-stamp the URL so browsers fetch the new bundle after an upgrade
+    # instead of serving a stale cached copy.  The bare _CARD_URL stays a
+    # substring of this, so the match/update logic below still finds and
+    # migrates a resource registered by a previous version.
+    resource_url = f"{_CARD_URL}?v={_MANIFEST_VERSION}"
     resources = cast(ResourceStorageCollection, lovelace_data.resources)
 
     if not resources.loaded:

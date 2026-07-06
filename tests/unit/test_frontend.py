@@ -47,7 +47,7 @@ def _setup_hass_for_card(hass: HomeAssistant, resources: MagicMock) -> None:
     hass.data["lovelace"] = _mock_lovelace(resources)
 
 
-async def test_register_card_creates_unversioned_resource(hass: HomeAssistant) -> None:
+async def test_register_card_creates_versioned_resource(hass: HomeAssistant) -> None:
     resources = _mock_resources()
     _setup_hass_for_card(hass, resources)
 
@@ -58,7 +58,10 @@ async def test_register_card_creates_unversioned_resource(hass: HomeAssistant) -
     assert hass.data[_REGISTERED_KEY] is True
     resources.async_create_item.assert_awaited_once()
     call_args = resources.async_create_item.call_args[0][0]
-    assert call_args == {"res_type": "module", "url": _CARD_URL}
+    assert call_args == {
+        "res_type": "module",
+        "url": f"{_CARD_URL}?v={_MANIFEST_VERSION}",
+    }
 
 
 async def test_register_card_idempotent(hass: HomeAssistant) -> None:
@@ -99,13 +102,14 @@ async def test_register_card_does_not_calculate_version_in_executor(
 
     executor.assert_not_awaited()
     call_args = resources.async_create_item.call_args[0][0]
-    assert call_args["url"] == _CARD_URL
+    assert call_args["url"] == f"{_CARD_URL}?v={_MANIFEST_VERSION}"
 
 
 async def test_register_card_skips_update_when_url_matches(hass: HomeAssistant) -> None:
+    current_url = f"{_CARD_URL}?v={_MANIFEST_VERSION}"
     with patch(f"{_FRONTEND_MODULE}._CARD_DIR", Path(__file__).parent):
         with patch(f"{_FRONTEND_MODULE}._CARD_FILENAME", "conftest.py"):
-            resources = _mock_resources([{"id": "res1", "url": _CARD_URL}])
+            resources = _mock_resources([{"id": "res1", "url": current_url}])
             _setup_hass_for_card(hass, resources)
 
             await async_register_card(hass)
