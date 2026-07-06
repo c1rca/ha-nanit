@@ -7,8 +7,10 @@ import { cardStyles } from "./styles";
 import "./nanit-card-editor";
 
 const STREAM_WATCH_INTERVAL_MS = 1000; // how often to verify the video is advancing
-const STREAM_WARMUP_MS = 12000; // grace after a (re)mount before a stall counts
-const STREAM_STALL_TICKS = 6; // consecutive ticks with no progress → remount
+const STREAM_STALL_TICKS = 8; // seconds a *previously-live* feed may freeze before remount
+const STREAM_HEALTHY_RESET_TICKS = 5; // seconds of steady playback that refill the remount budget
+const MAX_STREAM_RELOADS = 3; // forced remounts before backing off
+const STREAM_RELOAD_COOLDOWN_MS = 60000; // back-off window after repeated failed remounts
 
 @customElement("nanit-card")
 export class NanitCard extends LitElement {
@@ -19,8 +21,11 @@ export class NanitCard extends LitElement {
   @state() private _streamEpoch = 0;
   private _streamWatchTimer?: ReturnType<typeof setInterval>;
   private _lastVideoTime = 0;
-  private _stalledTicks = 0;
-  private _streamStartedAt = 0;
+  private _sawProgress = false;
+  private _stallStrikes = 0;
+  private _healthyTicks = 0;
+  private _reloadAttempts = 0;
+  private _reloadCooldownUntil = 0;
   private _watchedEpoch = -1;
 
   static styles = cardStyles;
@@ -79,12 +84,13 @@ export class NanitCard extends LitElement {
     const streamEl = this.renderRoot.querySelector("ha-camera-stream");
     if (streamEl) {
       // A new <ha-camera-stream> was mounted (first render or a forced reload):
-      // reset the warm-up window so we don't declare a stall before it starts.
+      // reset the per-mount liveness tracking so we start clean.
       if (this._watchedEpoch !== this._streamEpoch) {
         this._watchedEpoch = this._streamEpoch;
-        this._streamStartedAt = Date.now();
         this._lastVideoTime = 0;
-        this._stalledTicks = 0;
+        this._sawProgress = false;
+        this._stallStrikes = 0;
+        this._healthyTicks = 0;
       }
       this._startStreamWatch();
     } else {
@@ -92,12 +98,13 @@ export class NanitCard extends LitElement {
     }
   }
 
-  // Continuously verify the video is actually advancing.  HA keeps the <video>
-  // element mounted even after the RTMPS feed dies (goes black) and does not
-  // re-request a fresh stream on its own — so without this watchdog a
-  // mid-session stall stays black until the page is reloaded.  When the picture
-  // freezes we remount <ha-camera-stream>, which calls stream_source() again
-  // (re-arming the camera) just like a manual refresh, and never give up.
+  // Watch that the video keeps advancing.  HA leaves the <video> element
+  // mounted even after the RTMPS feed dies (goes black) and does not re-request
+  // a stream on its own, so we remount <ha-camera-stream> — which re-calls
+  // stream_source() like a manual refresh — when a *previously-live* feed
+  // freezes.  A feed that has never produced a frame is treated as still
+  // loading (never remounted), and repeated remounts back off, so a mis-read or
+  // a genuine outage can never spin in a remount loop.
   private _startStreamWatch(): void {
     if (this._streamWatchTimer) return;
     this._streamWatchTimer = setInterval(
@@ -113,57 +120,95 @@ export class NanitCard extends LitElement {
     }
   }
 
+  // The <video> may sit directly in ha-camera-stream's shadow root, or one
+  // level deeper inside its player child (ha-hls-player / ha-web-rtc-player),
+  // whose own shadow root querySelector cannot pierce.
+  private _findStreamVideo(streamEl: Element): HTMLVideoElement | null {
+    const root = streamEl.shadowRoot;
+    if (!root) return null;
+
+    const direct = root.querySelector("video");
+    if (direct) return direct as HTMLVideoElement;
+
+    // Fast path: the known player elements.
+    const player = root.querySelector("ha-hls-player, ha-web-rtc-player");
+    const known = player?.shadowRoot?.querySelector("video");
+    if (known) return known as HTMLVideoElement;
+
+    // Fallback: scan any child with its own shadow root, so this keeps working
+    // if HA renames the player element.
+    for (const child of Array.from(root.querySelectorAll("*"))) {
+      const nested = (child as HTMLElement).shadowRoot?.querySelector("video");
+      if (nested) return nested as HTMLVideoElement;
+    }
+    return null;
+  }
+
   private _checkStreamHealth(): void {
     const streamEl = this.renderRoot.querySelector("ha-camera-stream");
-    const video = streamEl?.shadowRoot?.querySelector("video") as
-      | HTMLVideoElement
-      | null
-      | undefined;
+    if (!streamEl) return;
+
+    const video = this._findStreamVideo(streamEl);
 
     if (!video) {
-      // A non-video renderer (MJPEG <img>/<canvas>) counts as healthy; otherwise
-      // the element hasn't produced any media yet — keep waiting.
-      if (streamEl?.shadowRoot?.querySelector("img, canvas")) {
-        this._markStreamHealthy();
+      // A non-video renderer (MJPEG <img>/<canvas>) is healthy as soon as it
+      // exists.  Otherwise the player has not produced a <video> yet — that is
+      // "still loading", never a stall, so we do NOT remount it.
+      if (streamEl.shadowRoot?.querySelector("img, canvas")) {
+        if (!this._streamLoaded) this._streamLoaded = true;
       }
       return;
     }
 
-    // currentTime advancing is the reliable "still live" signal — a frozen/black
-    // feed keeps its <video> element but stops progressing.
+    // currentTime advancing is the reliable "still live" signal.
     if (video.currentTime > this._lastVideoTime + 0.05) {
       this._lastVideoTime = video.currentTime;
-      this._markStreamHealthy();
+      this._sawProgress = true;
+      this._stallStrikes = 0;
+      if (!this._streamLoaded) this._streamLoaded = true;
+      // Refill the remount budget only after *sustained* playback so a feed
+      // that flaps (one frame, then freeze) cannot keep topping it up.
+      if (++this._healthyTicks >= STREAM_HEALTHY_RESET_TICKS) {
+        this._reloadAttempts = 0;
+        this._reloadCooldownUntil = 0;
+      }
       return;
     }
 
-    // A paused element (e.g. the browser tab is backgrounded) is not a stall.
-    if (video.paused) return;
+    this._healthyTicks = 0;
 
-    // Give a freshly (re)mounted stream time to start before counting stalls.
-    if (Date.now() - this._streamStartedAt < STREAM_WARMUP_MS) return;
+    // Only a genuine stall if the feed was actually live (produced frames) and
+    // is not merely paused (e.g. a backgrounded tab).  A never-started stream
+    // stays untouched — this is what prevents the perpetual-loading loop.
+    if (!this._sawProgress || video.paused) return;
 
-    if (++this._stalledTicks >= STREAM_STALL_TICKS) {
-      this._reloadStream();
+    if (++this._stallStrikes < STREAM_STALL_TICKS) return;
+    this._stallStrikes = 0;
+
+    const now = Date.now();
+    if (now < this._reloadCooldownUntil) return;
+    if (this._reloadAttempts >= MAX_STREAM_RELOADS) {
+      // Repeated remounts have not helped — back off before trying again so a
+      // persistent outage cannot loop.  The last frame stays until it recovers.
+      this._reloadCooldownUntil = now + STREAM_RELOAD_COOLDOWN_MS;
+      this._reloadAttempts = 0;
+      return;
     }
-  }
-
-  private _markStreamHealthy(): void {
-    this._stalledTicks = 0;
-    if (!this._streamLoaded) this._streamLoaded = true;
+    this._reloadAttempts += 1;
+    this._reloadStream();
   }
 
   private _reloadStream(): void {
     // Remount the stream element → fresh stream_source() → spinner, then reload.
-    this._stalledTicks = 0;
+    this._stallStrikes = 0;
+    this._sawProgress = false;
     this._lastVideoTime = 0;
     this._streamLoaded = false;
-    this._streamStartedAt = Date.now();
     this._streamEpoch += 1;
   }
 
   private _onStreamLoad(): void {
-    this._markStreamHealthy();
+    if (!this._streamLoaded) this._streamLoaded = true;
   }
 
   protected render(): TemplateResult {
@@ -175,7 +220,11 @@ export class NanitCard extends LitElement {
     const cameraOn = this._isCameraOn(entities);
     if (!cameraOn && this._streamLoaded) {
       this._streamLoaded = false;
-      this._stalledTicks = 0;
+      this._sawProgress = false;
+      this._stallStrikes = 0;
+      this._healthyTicks = 0;
+      this._reloadAttempts = 0;
+      this._reloadCooldownUntil = 0;
       this._stopStreamWatch();
     }
     const deviceName = entities.camera

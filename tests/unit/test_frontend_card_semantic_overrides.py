@@ -56,6 +56,33 @@ def test_card_remounts_stalled_stream_via_liveness_watchdog() -> None:
     assert "keyed(`${entities.camera}-${this._streamEpoch}`" in card
 
 
+def test_liveness_watchdog_reaches_nested_player_video() -> None:
+    """The watchdog must find the <video> nested inside HA's player child.
+
+    HA renders the HLS/WebRTC <video> inside ha-hls-player / ha-web-rtc-player,
+    one shadow root deeper than ha-camera-stream, so a single-level querySelector
+    misses it. The card must drill through the nested player.
+    """
+    card = _read(SRC_DIR / "nanit-card.ts")
+
+    assert "_findStreamVideo" in card
+    assert "ha-hls-player, ha-web-rtc-player" in card
+
+
+def test_liveness_watchdog_never_loops_on_a_never_started_stream() -> None:
+    """A feed that has never produced a frame must be treated as loading, not stalled.
+
+    Only a *previously-live* feed (one that advanced then froze) may trigger a
+    remount, and remounts must be bounded so a mis-read or outage can't loop.
+    """
+    card = _read(SRC_DIR / "nanit-card.ts")
+
+    assert "_sawProgress" in card
+    assert "if (!this._sawProgress || video.paused) return;" in card
+    assert "MAX_STREAM_RELOADS" in card
+    assert "_reloadCooldownUntil" in card
+
+
 def test_bundled_card_contains_semantic_override_support() -> None:
     """The shipped bundle should include the override logic after frontend build."""
     bundle = _read(BUNDLE)
