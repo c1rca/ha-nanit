@@ -6,8 +6,9 @@ import { resolveEntities, isEntityAvailable, getDeviceName } from "./utils";
 import { cardStyles } from "./styles";
 import "./nanit-card-editor";
 
-const STREAM_STALL_CHECKS = 16;
-const MAX_STREAM_RETRIES = 2;
+const STREAM_WATCH_INTERVAL_MS = 1000; // how often to verify the video is advancing
+const STREAM_WARMUP_MS = 12000; // grace after a (re)mount before a stall counts
+const STREAM_STALL_TICKS = 6; // consecutive ticks with no progress → remount
 
 @customElement("nanit-card")
 export class NanitCard extends LitElement {
@@ -16,9 +17,11 @@ export class NanitCard extends LitElement {
   @state() private _streamLoaded = false;
   @state() private _showNetwork = false;
   @state() private _streamEpoch = 0;
-  private _streamCheckTimer?: ReturnType<typeof setTimeout>;
-  private _streamCheckCount = 0;
-  private _streamRetryCount = 0;
+  private _streamWatchTimer?: ReturnType<typeof setInterval>;
+  private _lastVideoTime = 0;
+  private _stalledTicks = 0;
+  private _streamStartedAt = 0;
+  private _watchedEpoch = -1;
 
   static styles = cardStyles;
 
@@ -68,58 +71,99 @@ export class NanitCard extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
-    this._clearStreamCheck();
+    this._stopStreamWatch();
   }
 
   protected updated(changedProps: Map<string, unknown>): void {
     super.updated(changedProps);
-    if (!this._streamLoaded && !this._streamCheckTimer) {
-      const streamEl = this.renderRoot.querySelector("ha-camera-stream");
-      if (streamEl) this._scheduleStreamCheck();
+    const streamEl = this.renderRoot.querySelector("ha-camera-stream");
+    if (streamEl) {
+      // A new <ha-camera-stream> was mounted (first render or a forced reload):
+      // reset the warm-up window so we don't declare a stall before it starts.
+      if (this._watchedEpoch !== this._streamEpoch) {
+        this._watchedEpoch = this._streamEpoch;
+        this._streamStartedAt = Date.now();
+        this._lastVideoTime = 0;
+        this._stalledTicks = 0;
+      }
+      this._startStreamWatch();
+    } else {
+      this._stopStreamWatch();
     }
   }
 
-  private _scheduleStreamCheck(): void {
-    this._streamCheckTimer = setTimeout(() => {
-      this._streamCheckTimer = undefined;
-      const streamEl = this.renderRoot.querySelector("ha-camera-stream");
-      if (!streamEl) return;
-      const root = streamEl.shadowRoot;
-      if (root?.querySelector("video, img, canvas")) {
-        this._streamLoaded = true;
-        this._streamCheckCount = 0;
-      } else if (++this._streamCheckCount >= STREAM_STALL_CHECKS) {
-        this._retryStreamLoad();
-      } else {
-        this._scheduleStreamCheck();
-      }
-    }, 500);
+  // Continuously verify the video is actually advancing.  HA keeps the <video>
+  // element mounted even after the RTMPS feed dies (goes black) and does not
+  // re-request a fresh stream on its own — so without this watchdog a
+  // mid-session stall stays black until the page is reloaded.  When the picture
+  // freezes we remount <ha-camera-stream>, which calls stream_source() again
+  // (re-arming the camera) just like a manual refresh, and never give up.
+  private _startStreamWatch(): void {
+    if (this._streamWatchTimer) return;
+    this._streamWatchTimer = setInterval(
+      () => this._checkStreamHealth(),
+      STREAM_WATCH_INTERVAL_MS,
+    );
   }
 
-  private _retryStreamLoad(): void {
-    this._clearStreamCheck();
-    this._streamCheckCount = 0;
-    if (this._streamRetryCount >= MAX_STREAM_RETRIES) {
-      this._scheduleStreamCheck();
+  private _stopStreamWatch(): void {
+    if (this._streamWatchTimer) {
+      clearInterval(this._streamWatchTimer);
+      this._streamWatchTimer = undefined;
+    }
+  }
+
+  private _checkStreamHealth(): void {
+    const streamEl = this.renderRoot.querySelector("ha-camera-stream");
+    const video = streamEl?.shadowRoot?.querySelector("video") as
+      | HTMLVideoElement
+      | null
+      | undefined;
+
+    if (!video) {
+      // A non-video renderer (MJPEG <img>/<canvas>) counts as healthy; otherwise
+      // the element hasn't produced any media yet — keep waiting.
+      if (streamEl?.shadowRoot?.querySelector("img, canvas")) {
+        this._markStreamHealthy();
+      }
       return;
     }
-    this._streamRetryCount += 1;
+
+    // currentTime advancing is the reliable "still live" signal — a frozen/black
+    // feed keeps its <video> element but stops progressing.
+    if (video.currentTime > this._lastVideoTime + 0.05) {
+      this._lastVideoTime = video.currentTime;
+      this._markStreamHealthy();
+      return;
+    }
+
+    // A paused element (e.g. the browser tab is backgrounded) is not a stall.
+    if (video.paused) return;
+
+    // Give a freshly (re)mounted stream time to start before counting stalls.
+    if (Date.now() - this._streamStartedAt < STREAM_WARMUP_MS) return;
+
+    if (++this._stalledTicks >= STREAM_STALL_TICKS) {
+      this._reloadStream();
+    }
+  }
+
+  private _markStreamHealthy(): void {
+    this._stalledTicks = 0;
+    if (!this._streamLoaded) this._streamLoaded = true;
+  }
+
+  private _reloadStream(): void {
+    // Remount the stream element → fresh stream_source() → spinner, then reload.
+    this._stalledTicks = 0;
+    this._lastVideoTime = 0;
     this._streamLoaded = false;
+    this._streamStartedAt = Date.now();
     this._streamEpoch += 1;
   }
 
-  private _clearStreamCheck(): void {
-    if (this._streamCheckTimer) {
-      clearTimeout(this._streamCheckTimer);
-      this._streamCheckTimer = undefined;
-    }
-  }
-
   private _onStreamLoad(): void {
-    this._streamLoaded = true;
-    this._streamCheckCount = 0;
-    this._streamRetryCount = 0;
-    this._clearStreamCheck();
+    this._markStreamHealthy();
   }
 
   protected render(): TemplateResult {
@@ -131,9 +175,8 @@ export class NanitCard extends LitElement {
     const cameraOn = this._isCameraOn(entities);
     if (!cameraOn && this._streamLoaded) {
       this._streamLoaded = false;
-      this._streamCheckCount = 0;
-      this._streamRetryCount = 0;
-      this._clearStreamCheck();
+      this._stalledTicks = 0;
+      this._stopStreamWatch();
     }
     const deviceName = entities.camera
       ? getDeviceName(this.hass, entities.camera)

@@ -40,12 +40,18 @@ def test_visual_editor_includes_semantic_override_entity_pickers() -> None:
     assert "Humidity Entity Override" in editor
 
 
-def test_card_remounts_stalled_stream_after_initial_load_timeout() -> None:
-    """The card should recover when HA's camera stream element stalls on refresh."""
+def test_card_remounts_stalled_stream_via_liveness_watchdog() -> None:
+    """The card should continuously watch the video and remount it when it stalls.
+
+    Recovery must keep working *after* the initial load — HA leaves the <video>
+    element mounted when the RTMPS feed dies, so the card polls currentTime and
+    remounts <ha-camera-stream> (bumping the epoch) whenever it stops advancing.
+    """
     card = _read(SRC_DIR / "nanit-card.ts")
 
-    assert "STREAM_STALL_CHECKS" in card
-    assert "_retryStreamLoad()" in card
+    assert "_checkStreamHealth" in card
+    assert "video.currentTime" in card
+    assert "setInterval" in card
     assert "this._streamEpoch += 1" in card
     assert "keyed(`${entities.camera}-${this._streamEpoch}`" in card
 
