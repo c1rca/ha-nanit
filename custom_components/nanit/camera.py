@@ -25,6 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 _STREAM_START_ATTEMPTS = 3
 _STREAM_RETRY_DELAY = 2.0
 _STREAM_SOURCE_MAX_AGE = 45 * 60
+_STREAM_EXPIRY_RECHECK_INTERVAL = 60.0
 _SNAPSHOT_CACHE_TTL = 60.0
 _SNAPSHOT_PREFETCH_AGE = 30.0
 
@@ -119,10 +120,22 @@ class NanitCameraEntity(NanitEntity, Camera):
             self._cancel_stream_expiry_timer()
             self._cancel_stream_expiry_timer = None
 
-    @callback
-    def async_reset_stream(self) -> None:
+    async def async_reset_stream(self) -> None:
         """Reset HA's cached Nanit stream so the next viewer gets a fresh RTMPS URL."""
-        self._invalidate_stream("frontend recovery request")
+        await self._async_invalidate_stream("frontend recovery request")
+
+    async def _async_invalidate_stream(self, reason: str) -> None:
+        """Stop a cached stream before making it available for replacement."""
+        old_stream = self.stream
+        if old_stream is not None:
+            _LOGGER.debug("Invalidating cached stream after %s", reason)
+            await self._stop_discarded_stream(old_stream)
+            if self.stream is old_stream:
+                self.stream = None
+        self._stream_source_started_at = 0.0
+        if self._cancel_stream_expiry_timer is not None:
+            self._cancel_stream_expiry_timer()
+            self._cancel_stream_expiry_timer = None
 
     async def _stop_discarded_stream(self, stream: Any) -> None:
         """Best-effort cleanup for a stream removed from HA's cache."""
@@ -176,7 +189,7 @@ class NanitCameraEntity(NanitEntity, Camera):
         self._schedule_stream_expiry_timer()
         return source
 
-    def _schedule_stream_expiry_timer(self) -> None:
+    def _schedule_stream_expiry_timer(self, delay: float = _STREAM_SOURCE_MAX_AGE) -> None:
         """Schedule backend stream invalidation so token expiry is not update-dependent."""
         if self._cancel_stream_expiry_timer is not None:
             self._cancel_stream_expiry_timer()
@@ -192,9 +205,26 @@ class NanitCameraEntity(NanitEntity, Camera):
 
         self._cancel_stream_expiry_timer = async_call_later(
             hass,
-            _STREAM_SOURCE_MAX_AGE,
-            lambda _now: self._invalidate_stream("stream source age timer"),
+            delay,
+            lambda _now: self._handle_stream_expiry(),
         )
+
+    @callback
+    def _handle_stream_expiry(self) -> None:
+        """Refresh an expired source only after active viewers have detached."""
+        stream = self.stream
+        if stream is None:
+            self._cancel_stream_expiry_timer = None
+            return
+        try:
+            has_active_outputs = bool(stream.outputs())
+        except (AttributeError, RuntimeError):
+            has_active_outputs = False
+        if has_active_outputs:
+            _LOGGER.debug("Deferring Nanit stream expiry while viewers are active")
+            self._schedule_stream_expiry_timer(_STREAM_EXPIRY_RECHECK_INTERVAL)
+            return
+        self._invalidate_stream("stream source age timer")
 
     async def _async_start_streaming_safe(self, rtmps_url: str | None = None) -> bool:
         """Send PUT_STREAMING with retry.  Returns True on success."""

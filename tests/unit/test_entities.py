@@ -726,20 +726,44 @@ def test_camera_invalidates_stream_on_power_state_change() -> None:
     assert entity._stream_source_started_at == 0.0
 
 
-def test_camera_reset_stream_service_invalidates_cached_stream() -> None:
+async def test_camera_reset_stream_service_stops_cached_stream_before_release(
+    hass: HomeAssistant,
+) -> None:
     coordinator = _push_coordinator(_camera_state())
     entity = NanitCameraEntity(coordinator, MagicMock(uid="cam_1"))
-    entity.stream = MagicMock()
+    entity.hass = hass
+    stream = MagicMock()
+    stream.stop = AsyncMock()
+    entity.stream = stream
     entity._stream_source_started_at = 100.0
     cancel = MagicMock()
     entity._cancel_stream_expiry_timer = cancel
 
-    entity.async_reset_stream()
+    await entity.async_reset_stream()
 
+    stream.stop.assert_awaited_once_with()
     assert entity.stream is None
     assert entity._stream_source_started_at == 0.0
     cancel.assert_called_once_with()
     assert entity._cancel_stream_expiry_timer is None
+
+
+def test_camera_expiry_defers_while_stream_has_active_outputs(
+    hass: HomeAssistant,
+) -> None:
+    coordinator = _push_coordinator(_camera_state())
+    entity = NanitCameraEntity(coordinator, MagicMock(uid="cam_1"))
+    entity.hass = hass
+    stream = MagicMock()
+    stream.outputs.return_value = {"hls": MagicMock()}
+    entity.stream = stream
+    entity._stream_source_started_at = 100.0
+
+    with patch("custom_components.nanit.camera.async_call_later") as schedule:
+        entity._handle_stream_expiry()
+
+    assert entity.stream is stream
+    schedule.assert_called_once()
 
 
 async def test_camera_start_streaming_safe_falls_back_for_legacy_client_signature() -> None:
