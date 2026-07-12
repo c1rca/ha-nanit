@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Any
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
@@ -98,9 +99,20 @@ class NanitCameraEntity(NanitEntity, Camera):
         super()._handle_coordinator_update()
 
     def _invalidate_stream(self, reason: str = "state change") -> None:
-        """Discard HA's cached stream so a fresh one is created on next view."""
+        """Stop and discard HA's cached stream so a fresh one can be created."""
         if self.stream is not None:
+            old_stream = self.stream
             _LOGGER.debug("Invalidating cached stream after %s", reason)
+            # Dropping the reference alone leaves HA's decode worker alive until
+            # its normal idle cleanup. Stop it before replacing the cached stream
+            # to prevent overlapping workers during frontend recovery.
+            if self.hass is not None:
+                self.hass.create_task(
+                    self._stop_discarded_stream(old_stream),
+                    name=f"nanit_stop_discarded_stream_{self._camera.uid}",
+                )
+            else:
+                _LOGGER.debug("Cannot stop discarded Nanit stream before HA attach")
             self.stream = None
         self._stream_source_started_at = 0.0
         if self._cancel_stream_expiry_timer is not None:
@@ -111,6 +123,13 @@ class NanitCameraEntity(NanitEntity, Camera):
     def async_reset_stream(self) -> None:
         """Reset HA's cached Nanit stream so the next viewer gets a fresh RTMPS URL."""
         self._invalidate_stream("frontend recovery request")
+
+    async def _stop_discarded_stream(self, stream: Any) -> None:
+        """Best-effort cleanup for a stream removed from HA's cache."""
+        try:
+            await stream.stop()
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Failed to stop discarded Nanit stream", exc_info=True)
 
     def _invalidate_stream_if_expired(self) -> None:
         """Discard HA's cached stream shortly before its RTMPS token can expire."""

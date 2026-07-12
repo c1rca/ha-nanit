@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from homeassistant.components.diagnostics import REDACTED
 from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_HS_COLOR
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util.color import brightness_to_value, value_to_brightness
 
@@ -1176,6 +1177,26 @@ def test_camera_invalidate_stream_clears_stream() -> None:
     entity._invalidate_stream()
 
     assert entity.stream is None
+
+
+@pytest.mark.asyncio
+async def test_camera_invalidate_stream_stops_discarded_stream(
+    hass: HomeAssistant,
+) -> None:
+    from custom_components.nanit.camera import NanitCameraEntity
+
+    coordinator = _push_coordinator(_camera_state(sleep_mode=False))
+    entity = NanitCameraEntity(coordinator, MagicMock(uid="cam_1"))
+    entity.hass = hass
+    stream = MagicMock()
+    stream.stop = AsyncMock()
+    entity.stream = stream
+
+    entity._invalidate_stream("test")
+    await hass.async_block_till_done()
+
+    assert entity.stream is None
+    stream.stop.assert_awaited_once_with()
 
 
 # ---------------------------------------------------------------------------
