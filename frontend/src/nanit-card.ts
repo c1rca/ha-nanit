@@ -8,6 +8,7 @@ import "./nanit-card-editor";
 
 const STREAM_WATCHDOG_INTERVAL_MS = 1000;
 const STREAM_STARTUP_RELOAD_TICKS = 15;
+const STREAM_VISUAL_STARTUP_RELOAD_TICKS = 30;
 const STREAM_STALL_TICKS = 8;
 const STREAM_MAX_RELOADS = 3;
 const STREAM_RELOAD_COOLDOWN_MS = 60000;
@@ -24,7 +25,7 @@ export class NanitCard extends LitElement {
   @property({ attribute: false }) hass!: HomeAssistant;
   @state() private _config!: NanitCardConfig;
   @state() private _streamLoaded = false;
-  @state() private _showStreamRecoveryLoader = false;
+
   @state() private _showNetwork = false;
   @state() private _streamEpoch = 0;
   private _streamWatchdog?: ReturnType<typeof setInterval>;
@@ -170,6 +171,7 @@ export class NanitCard extends LitElement {
     if (!streamEl) return;
 
 
+    const hasVisualStream = this._hasVisualStreamElement(streamEl);
     const video = this._findStreamVideo(streamEl);
 
     // Fail open: after a grace window, hide the loader regardless — never let it
@@ -179,12 +181,17 @@ export class NanitCard extends LitElement {
       !this._streamLoaded &&
       this._streamMountedAt > 0 &&
       Date.now() - this._streamMountedAt > STREAM_LOADED_FAILOPEN_MS
+      && hasVisualStream
     ) {
+      this._streamLoaded = true;
     }
 
     if (!video) {
       this._startupStrikes += 1;
-      if (this._startupStrikes >= STREAM_STARTUP_RELOAD_TICKS) void this._recoverStream();
+      const threshold = hasVisualStream
+        ? STREAM_VISUAL_STARTUP_RELOAD_TICKS
+        : STREAM_STARTUP_RELOAD_TICKS;
+      if (this._startupStrikes >= threshold) void this._recoverStream();
       return;
     }
 
@@ -313,11 +320,6 @@ export class NanitCard extends LitElement {
     this._healthyTicks = 0;
   }
 
-  private _onStreamLoad(): void {
-    // Player load is not proof that a decoded frame exists. The watchdog
-    // marks the stream ready only after readyState >= HAVE_CURRENT_DATA or
-    // observed playback progress.
-  }
 
   private _resetStreamState(): void {
     this._streamLoaded = false;
@@ -495,7 +497,7 @@ export class NanitCard extends LitElement {
                     data-stream-epoch=${this._streamEpoch}
                     .hass=${this.hass}
                     .stateObj=${cameraState}
-                    @load=${this._onStreamLoad}
+
                   ></ha-camera-stream>
                 `)}
               </div>
