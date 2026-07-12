@@ -153,6 +153,14 @@ class WsTransport:
         if self._ws is not None and not self._ws.closed:
             await self._ws.close()
 
+    def _ensure_reconnect_task(self) -> None:
+        """Schedule exactly one reconnect loop for concurrent failure signals."""
+        if self._closed:
+            return
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        self._reconnect_task = asyncio.get_running_loop().create_task(self._reconnect_loop())
+
     # ------------------------------------------------------------------
     # Internal — connection lifecycle
     # ------------------------------------------------------------------
@@ -249,7 +257,7 @@ class WsTransport:
 
         # If we weren't explicitly closed, attempt to reconnect.
         if not self._closed:
-            self._reconnect_task = asyncio.get_running_loop().create_task(self._reconnect_loop())
+            self._ensure_reconnect_task()
 
     async def _keepalive_loop(self) -> None:
         """Send protobuf KEEPALIVE message every ``_KEEPALIVE_INTERVAL`` seconds."""
@@ -264,12 +272,7 @@ class WsTransport:
                     _LOGGER.warning("Keepalive send failed, triggering reconnect")
                     if self._ws is not None and not self._ws.closed:
                         await self._ws.close()
-                    if not self._closed and (
-                        self._reconnect_task is None or self._reconnect_task.done()
-                    ):
-                        self._reconnect_task = asyncio.get_running_loop().create_task(
-                            self._reconnect_loop()
-                        )
+                    self._ensure_reconnect_task()
                     break
         except asyncio.CancelledError:
             return
@@ -302,6 +305,7 @@ class WsTransport:
                     max_msg_size=_MAX_MSG_SIZE,
                 )
                 loop = asyncio.get_running_loop()
+                self._last_received_at = loop.time()
                 self._recv_task = loop.create_task(self._recv_loop())
                 self._keepalive_task = loop.create_task(self._keepalive_loop())
                 self._on_connection_change(ConnectionState.CONNECTED, self._transport_kind, None)

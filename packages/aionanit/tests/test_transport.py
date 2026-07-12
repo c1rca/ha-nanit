@@ -349,3 +349,40 @@ class TestAsyncForceReconnect:
 
         await t.async_force_reconnect()
         mock_ws.close.assert_not_awaited()
+
+
+class TestReconnectSafety:
+    async def test_idle_seconds_resets_after_reconnect(self) -> None:
+        """A fresh socket must not inherit the previous connection's idle age."""
+        t, session, _, _ = _make_transport()
+        t._url = "wss://api.nanit.com/focus/cameras/cam1/user_connect"
+        t._headers = {"Authorization": "Bearer token"}
+        t._transport_kind = TransportKind.CLOUD
+        t._closed = False
+        t._last_received_at = asyncio.get_running_loop().time() - 600
+
+        mock_ws = AsyncMock(spec=aiohttp.ClientWebSocketResponse)
+        mock_ws.closed = False
+        mock_ws.__aiter__ = MagicMock(return_value=iter([]))
+        session.ws_connect = AsyncMock(return_value=mock_ws)
+
+        await t._reconnect_loop()
+
+        assert t.idle_seconds < 1.0
+        await t.async_close()
+
+    async def test_only_one_reconnect_task_is_scheduled(self) -> None:
+        """Recv and keepalive failures must share one reconnect attempt."""
+        t, *_ = _make_transport()
+        t._closed = False
+        blocker = asyncio.Event()
+        t._reconnect_loop = AsyncMock(side_effect=blocker.wait)
+
+        t._ensure_reconnect_task()
+        first_task = t._reconnect_task
+        t._ensure_reconnect_task()
+        await asyncio.sleep(0)
+
+        assert t._reconnect_task is first_task
+        assert t._reconnect_loop.await_count == 1
+        await t.async_close()
