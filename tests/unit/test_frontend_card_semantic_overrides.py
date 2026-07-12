@@ -93,7 +93,8 @@ def test_card_source_recovers_stream_on_page_resume() -> None:
     assert "_recoverStreamOnResume" in card
     assert "STREAM_VISUAL_READY_SELECTORS" in card
     assert "_hasVisualStreamElement" in card
-    assert "this._streamPlayerMounted = true" in card
+    assert "Connecting video" not in card
+    assert "stream-loader.connecting" not in card
     assert "STREAM_STARTUP_RELOAD_TICKS = 15" in card
     assert "STREAM_BACKEND_RESET_FALLBACK_MS = 10000" in card
     assert "this._scheduleBackendRecoveryFallback()" in card

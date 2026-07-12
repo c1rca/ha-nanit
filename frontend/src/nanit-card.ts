@@ -24,7 +24,7 @@ export class NanitCard extends LitElement {
   @property({ attribute: false }) hass!: HomeAssistant;
   @state() private _config!: NanitCardConfig;
   @state() private _streamLoaded = false;
-  @state() private _streamPlayerMounted = false;
+  @state() private _showStreamRecoveryLoader = false;
   @state() private _showNetwork = false;
   @state() private _streamEpoch = 0;
   private _streamWatchdog?: ReturnType<typeof setInterval>;
@@ -169,7 +169,6 @@ export class NanitCard extends LitElement {
     const streamEl = this.renderRoot.querySelector("ha-camera-stream");
     if (!streamEl) return;
 
-    this._streamPlayerMounted = this._hasVisualStreamElement(streamEl);
 
     const video = this._findStreamVideo(streamEl);
 
@@ -181,7 +180,6 @@ export class NanitCard extends LitElement {
       this._streamMountedAt > 0 &&
       Date.now() - this._streamMountedAt > STREAM_LOADED_FAILOPEN_MS
     ) {
-      this._streamPlayerMounted = true;
     }
 
     if (!video) {
@@ -195,7 +193,6 @@ export class NanitCard extends LitElement {
     // currentTime may never advance — so hide the loader immediately.
     if (!this._streamLoaded && video.readyState >= 2) {
       this._streamLoaded = true;
-      this._streamPlayerMounted = true;
       this._clearBackendRecoveryFallback();
     }
 
@@ -211,7 +208,6 @@ export class NanitCard extends LitElement {
       this._stallStrikes = 0;
       this._startupStrikes = 0;
       this._streamLoaded = true;
-      this._streamPlayerMounted = true;
       this._clearBackendRecoveryFallback();
       // Refill the reload budget only after *sustained* playback, so a feed
       // that flaps (one frame, then freeze) can't keep topping it up.
@@ -321,12 +317,10 @@ export class NanitCard extends LitElement {
     // Player load is not proof that a decoded frame exists. The watchdog
     // marks the stream ready only after readyState >= HAVE_CURRENT_DATA or
     // observed playback progress.
-    this._streamPlayerMounted = true;
   }
 
   private _resetStreamState(): void {
     this._streamLoaded = false;
-    this._streamPlayerMounted = false;
     this._clearStreamWatchdog();
     this._clearBackendRecoveryFallback();
     this._lastVideoTime = 0;
@@ -505,12 +499,10 @@ export class NanitCard extends LitElement {
                   ></ha-camera-stream>
                 `)}
               </div>
-              <div class="stream-loader ${this._streamLoaded ? "hidden" : this._streamPlayerMounted ? "connecting" : ""}">
+              <div class="stream-loader ${this._streamLoaded ? "hidden" : ""}">
                 <div class="loader-content">
                   <ha-icon icon="mdi:camera"></ha-icon>
-                  ${this._streamPlayerMounted
-                    ? html`<span class="loader-label">Connecting video…</span>`
-                    : html`<div class="loader-spinner"></div>`}
+                  <div class="loader-spinner"></div>
                 </div>
               </div>
             `
