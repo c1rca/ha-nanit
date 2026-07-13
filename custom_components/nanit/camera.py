@@ -25,7 +25,6 @@ _LOGGER = logging.getLogger(__name__)
 _STREAM_START_ATTEMPTS = 3
 _STREAM_RETRY_DELAY = 2.0
 _STREAM_SOURCE_MAX_AGE = 45 * 60
-_STREAM_EXPIRY_RECHECK_INTERVAL = 60.0
 _SNAPSHOT_CACHE_TTL = 60.0
 _SNAPSHOT_PREFETCH_AGE = 30.0
 
@@ -211,18 +210,9 @@ class NanitCameraEntity(NanitEntity, Camera):
 
     @callback
     def _handle_stream_expiry(self) -> None:
-        """Refresh an expired source only after active viewers have detached."""
-        stream = self.stream
-        if stream is None:
+        """Discard the cached source before its embedded media token expires."""
+        if self.stream is None:
             self._cancel_stream_expiry_timer = None
-            return
-        try:
-            has_active_outputs = bool(stream.outputs())
-        except (AttributeError, RuntimeError):
-            has_active_outputs = False
-        if has_active_outputs:
-            _LOGGER.debug("Deferring Nanit stream expiry while viewers are active")
-            self._schedule_stream_expiry_timer(_STREAM_EXPIRY_RECHECK_INTERVAL)
             return
         self._invalidate_stream("stream source age timer")
 
