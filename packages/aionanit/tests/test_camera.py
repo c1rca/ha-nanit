@@ -1062,6 +1062,25 @@ class TestOnReconnected:
 
 
 class TestTimeoutForceReconnect:
+    async def test_timeout_forces_reconnect_even_when_connection_looks_fresh(self) -> None:
+        """A timed-out request must not reuse the same superficially fresh socket."""
+        cam, *_ = _make_camera()
+
+        cam._transport = MagicMock()
+        cam._transport.connected = True
+        cam._transport.idle_seconds = 1.0
+        cam._transport.async_send = AsyncMock()
+        cam._async_reconnect = AsyncMock()
+
+        with pytest.raises(NanitRequestTimeout):
+            await cam._send_request(
+                RequestType.GET_STATUS,
+                timeout=0.01,
+                get_status=GetStatus(all=True),
+            )
+
+        cam._async_reconnect.assert_awaited_once_with(force=True)
+
     async def test_timeout_calls_reconnect_before_retry(self) -> None:
         """Request timeout triggers _async_reconnect, then retries."""
         cam, *_ = _make_camera()

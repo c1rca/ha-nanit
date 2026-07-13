@@ -793,7 +793,7 @@ class NanitCamera:
                 _ = self._pending.resolve(request_id, Response())
                 if attempt == 0 and reconnect_on_failure:
                     _LOGGER.warning("Send failed, reconnecting and retrying")
-                    await self._async_reconnect()
+                    await self._async_reconnect(force=True)
                     continue
                 raise
 
@@ -805,7 +805,7 @@ class NanitCamera:
                         "Request %s lost during transport drop, reconnecting and retrying",
                         RequestType.Name(request_type),
                     )
-                    await self._async_reconnect()
+                    await self._async_reconnect(force=True)
                     continue
                 raise
             except TimeoutError:
@@ -817,7 +817,7 @@ class NanitCamera:
                         request_id,
                         timeout,
                     )
-                    await self._async_reconnect()
+                    await self._async_reconnect(force=True)
                     continue
                 raise NanitRequestTimeout(
                     RequestType.Name(request_type), request_id, timeout
@@ -900,14 +900,16 @@ class NanitCamera:
     # Internal — inline reconnect
     # ------------------------------------------------------------------
 
-    async def _async_reconnect(self) -> None:
+    async def _async_reconnect(self, *, force: bool = False) -> None:
         """Close and re-establish the WebSocket connection inline.
 
         Used by ``_send_request`` to transparently recover from stale or
         broken connections without surfacing errors to the caller.
 
         A lock prevents concurrent reconnects, and a freshness guard skips
-        the reconnect if another caller just completed one.
+        opportunistic reconnects if another caller just completed one. Request
+        failures pass ``force=True`` because a recent frame does not prove that
+        the timed-out request path is still usable.
 
         The ``locked()`` pre-check prevents a deadlock that occurs when
         ``_async_enable_sensor_push`` (called at the end of this method)
@@ -925,7 +927,8 @@ class NanitCamera:
         async with self._reconnect_lock:
             # Skip if another caller already reconnected.
             if (
-                self._transport.connected
+                not force
+                and self._transport.connected
                 and self._transport.idle_seconds < _FRESH_CONNECTION_WINDOW
             ):
                 _LOGGER.debug(
