@@ -173,6 +173,48 @@ async def test_reconnect_skips_when_lock_already_held() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_reconnect_callers_await_one_shared_result() -> None:
+    """Concurrent recovery callers must not continue before reconnect completes."""
+    camera, token_manager = _make_camera()
+    camera._stopped = False
+    token_manager._expires_at = time.monotonic() + 3600.0
+    gate = asyncio.Event()
+
+    transport = MagicMock()
+    transport.connected = False
+    transport.idle_seconds = 999.0
+    transport.transport_kind = TransportKind.CLOUD
+
+    async def _wait_for_gate(*_args: object) -> None:
+        await gate.wait()
+
+    transport.async_connect_cloud = AsyncMock(side_effect=_wait_for_gate)
+    camera._transport = transport
+    camera._async_enable_sensor_push = AsyncMock()
+
+    first = asyncio.create_task(camera._async_reconnect(force=True))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(camera._async_reconnect(force=True))
+    await asyncio.sleep(0)
+
+    first_was_waiting = not first.done()
+    second_was_waiting = not second.done()
+    connect_count_while_blocked = transport.async_connect_cloud.await_count
+
+    gate.set()
+    await asyncio.gather(first, second)
+
+    camera._cancel_token_refresh()
+    camera._cancel_sensor_poll()
+    camera._cancel_playback_poll()
+
+    assert first_was_waiting
+    assert second_was_waiting
+    assert connect_count_while_blocked == 1
+    assert transport.async_connect_cloud.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_reconnect_completes_with_unresponsive_camera() -> None:
     """_async_reconnect must not deadlock when the camera never responds.
 

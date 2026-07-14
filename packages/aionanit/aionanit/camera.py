@@ -85,7 +85,7 @@ _HEALTH_CHECK_INTERVAL: float = 270.0  # 4.5 min — periodic session liveness c
 _FRESH_CONNECTION_WINDOW: float = 10.0  # skip reconnect if connected within this
 _DEFAULT_SENSOR_POLL_INTERVAL: float = 120.0  # 2 min — poll sensors camera doesn't push
 _DEFAULT_PLAYBACK_POLL_INTERVAL: float = 30.0  # 30s — poll GET_PLAYBACK for external changes
-_STREAM_TOKEN_MIN_TTL: float = 1800.0  # Avoid blocking most stream opens on token refresh
+_STREAM_TOKEN_MIN_TTL: float = 3300.0  # Keep 45-minute HA sources inside JWT lifetime
 
 
 class NanitCamera:
@@ -135,6 +135,7 @@ class NanitCamera:
         self._playback_poll_task: asyncio.Task[None] | None = None
         self._token_refresh_task: asyncio.Task[None] | None = None
         self._reconnected_task: asyncio.Task[None] | None = None
+        self._inline_reconnect_task: asyncio.Task[None] | None = None
         self._reconnect_lock: asyncio.Lock = asyncio.Lock()
         self._stopped: bool = False
         self._connected_event: asyncio.Event = asyncio.Event()
@@ -231,6 +232,7 @@ class NanitCamera:
         self._cancel_sensor_poll()
         self._cancel_playback_poll()
         self._cancel_reconnected_task()
+        self._cancel_inline_reconnect()
         self._pending.cancel_all()
         await self._transport.async_close()
 
@@ -673,8 +675,13 @@ class NanitCamera:
         elif state in (ConnectionState.DISCONNECTED, ConnectionState.RECONNECTING):
             self._connected_event.clear()
 
-        if state == ConnectionState.DISCONNECTED:
-            self._pending.cancel_all(NanitTransportError("Connection lost"))
+        if state in (ConnectionState.DISCONNECTED, ConnectionState.RECONNECTING):
+            reason = (
+                "Connection reconnecting"
+                if state == ConnectionState.RECONNECTING
+                else "Connection lost"
+            )
+            self._pending.cancel_all(NanitTransportError(reason))
 
         self._notify_subscribers(CameraEventKind.CONNECTION_CHANGE)
 
@@ -901,6 +908,29 @@ class NanitCamera:
     # ------------------------------------------------------------------
 
     async def _async_reconnect(self, *, force: bool = False) -> None:
+        """Await one shared inline reconnect for all concurrent callers."""
+        active = self._inline_reconnect_task
+        current = asyncio.current_task()
+        if active is not None and not active.done():
+            # Re-initialization can issue a request from inside the reconnect
+            # task. It must not await itself; outside callers await its result.
+            if active is current:
+                return
+            await asyncio.shield(active)
+            return
+
+        task = asyncio.create_task(
+            self._perform_reconnect(force=force),
+            name=f"nanit_inline_reconnect_{self._uid}",
+        )
+        self._inline_reconnect_task = task
+        try:
+            await asyncio.shield(task)
+        finally:
+            if self._inline_reconnect_task is task and task.done():
+                self._inline_reconnect_task = None
+
+    async def _perform_reconnect(self, *, force: bool = False) -> None:
         """Close and re-establish the WebSocket connection inline.
 
         Used by ``_send_request`` to transparently recover from stale or
@@ -987,6 +1017,12 @@ class NanitCamera:
         if self._reconnected_task is not None and not self._reconnected_task.done():
             self._reconnected_task.cancel()
         self._reconnected_task = None
+
+    def _cancel_inline_reconnect(self) -> None:
+        task = self._inline_reconnect_task
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+        self._inline_reconnect_task = None
 
     async def _token_refresh_loop(self) -> None:
         try:

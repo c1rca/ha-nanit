@@ -25,6 +25,7 @@ export class NanitCard extends LitElement {
   @property({ attribute: false }) hass!: HomeAssistant;
   @state() private _config!: NanitCardConfig;
   @state() private _streamLoaded = false;
+  private _streamHealthy = false;
 
   @state() private _showNetwork = false;
   @state() private _streamEpoch = 0;
@@ -200,7 +201,6 @@ export class NanitCard extends LitElement {
     // currentTime may never advance — so hide the loader immediately.
     if (!this._streamLoaded && video.readyState >= 2) {
       this._streamLoaded = true;
-      this._clearBackendRecoveryFallback();
     }
 
     if (video.readyState < 2) {
@@ -215,6 +215,7 @@ export class NanitCard extends LitElement {
       this._stallStrikes = 0;
       this._startupStrikes = 0;
       this._streamLoaded = true;
+      this._streamHealthy = true;
       this._clearBackendRecoveryFallback();
       // Refill the reload budget only after *sustained* playback, so a feed
       // that flaps (one frame, then freeze) can't keep topping it up.
@@ -227,8 +228,13 @@ export class NanitCard extends LitElement {
     }
 
     this._healthyTicks = 0;
+    this._streamHealthy = false;
 
-    if (!this._sawProgress || video.paused) return;
+    if (!this._sawProgress) {
+      this._startupStrikes += 1;
+      if (this._startupStrikes >= STREAM_STARTUP_RELOAD_TICKS) void this._recoverStream();
+      return;
+    }
 
     this._stallStrikes += 1;
     if (this._stallStrikes >= STREAM_STALL_TICKS) void this._recoverStream();
@@ -253,7 +259,7 @@ export class NanitCard extends LitElement {
     this._clearBackendRecoveryFallback();
     this._backendRecoveryFallback = window.setTimeout(() => {
       this._backendRecoveryFallback = undefined;
-      if (this._streamLoaded || this._backendRecoveryInFlight) return;
+      if (this._streamHealthy || this._backendRecoveryInFlight) return;
       this._backendRecoveryInFlight = true;
       void this._requestBackendStreamReset()
         .catch(() => undefined)
@@ -313,6 +319,7 @@ export class NanitCard extends LitElement {
 
     this._streamEpoch += 1;
     this._streamLoaded = false;
+    this._streamHealthy = false;
     this._lastVideoTime = 0;
     this._sawProgress = false;
     this._stallStrikes = 0;
@@ -323,6 +330,7 @@ export class NanitCard extends LitElement {
 
   private _resetStreamState(): void {
     this._streamLoaded = false;
+    this._streamHealthy = false;
     this._clearStreamWatchdog();
     this._clearBackendRecoveryFallback();
     this._lastVideoTime = 0;

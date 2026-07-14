@@ -903,7 +903,7 @@ class TestStreaming:
 
         url = await cam.async_get_stream_rtmps_url()
         assert url == "rtmps://media-secured.nanit.com/nanit/baby_uid_1.fresh_token"
-        tm.async_get_access_token.assert_awaited_once_with(min_ttl=1800.0)
+        tm.async_get_access_token.assert_awaited_once_with(min_ttl=3300.0)
 
     async def test_start_streaming_reuses_provided_rtmps_url(self) -> None:
         cam, tm, _ = _make_camera()
@@ -1017,6 +1017,16 @@ class TestAsyncGetCloudHeaders:
 
 
 class TestOnReconnected:
+    async def test_reconnecting_fails_pending_requests_immediately(self) -> None:
+        """Requests on a discarded socket must not wait for their full timeout."""
+        cam, *_ = _make_camera()
+        future = cam._pending.track(42)
+
+        cam._on_connection_change(ConnectionState.RECONNECTING, TransportKind.CLOUD, None)
+
+        with pytest.raises(NanitTransportError, match="reconnecting"):
+            await future
+
     async def test_connected_after_reconnect_triggers_reinit(self) -> None:
         """CONNECTED after reconnect_attempts > 0 schedules _async_on_reconnected."""
         cam, *_ = _make_camera()

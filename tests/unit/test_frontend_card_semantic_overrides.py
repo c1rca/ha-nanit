@@ -56,7 +56,8 @@ def test_card_source_contains_stream_liveness_watchdog() -> None:
     assert "_findStreamVideo" in card
     assert "ha-hls-player, ha-web-rtc-player" in card
     assert "video.currentTime > this._lastVideoTime" in card
-    assert "!this._sawProgress || video.paused" in card
+    assert "if (!this._sawProgress)" in card
+    assert "this._streamHealthy = false" in card
     assert "_reloadStream" in card
     assert "data-stream-epoch" in card
 
@@ -73,6 +74,19 @@ def test_card_source_requests_backend_stream_reset_before_recovery_remount() -> 
     assert "this._reloadStream();" in card
     assert "_scheduleBackendRecoveryFallback()" in card
     assert "reload_config_entry" not in card
+
+
+def test_backend_recovery_uses_media_health_not_loader_visibility() -> None:
+    """A black player shell must not suppress the backend recovery fallback."""
+    card = _read(SRC_DIR / "nanit-card.ts")
+
+    assert "_streamHealthy" in card
+    assert "if (this._streamHealthy || this._backendRecoveryInFlight) return;" in card
+    assert "if (this._streamLoaded || this._backendRecoveryInFlight) return;" not in card
+    visual_ready_block = card.split("if (!this._streamLoaded && video.readyState >= 2)", 1)[
+        1
+    ].split("}", 1)[0]
+    assert "_clearBackendRecoveryFallback" not in visual_ready_block
 
 
 def test_bundled_card_requests_backend_stream_reset_before_recovery_remount() -> None:

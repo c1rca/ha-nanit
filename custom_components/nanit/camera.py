@@ -25,6 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 _STREAM_START_ATTEMPTS = 3
 _STREAM_RETRY_DELAY = 2.0
 _STREAM_SOURCE_MAX_AGE = 45 * 60
+_STREAM_STOP_TIMEOUT = 5.0
 _SNAPSHOT_CACHE_TTL = 60.0
 _SNAPSHOT_PREFETCH_AGE = 30.0
 
@@ -128,9 +129,11 @@ class NanitCameraEntity(NanitEntity, Camera):
         old_stream = self.stream
         if old_stream is not None:
             _LOGGER.debug("Invalidating cached stream after %s", reason)
-            await self._stop_discarded_stream(old_stream)
-            if self.stream is old_stream:
-                self.stream = None
+            try:
+                await self._stop_discarded_stream(old_stream)
+            finally:
+                if self.stream is old_stream:
+                    self.stream = None
         self._stream_source_started_at = 0.0
         if self._cancel_stream_expiry_timer is not None:
             self._cancel_stream_expiry_timer()
@@ -139,7 +142,13 @@ class NanitCameraEntity(NanitEntity, Camera):
     async def _stop_discarded_stream(self, stream: Any) -> None:
         """Best-effort cleanup for a stream removed from HA's cache."""
         try:
-            await stream.stop()
+            async with asyncio.timeout(_STREAM_STOP_TIMEOUT):
+                await stream.stop()
+        except TimeoutError:
+            _LOGGER.warning(
+                "Timed out after %.0fs stopping discarded Nanit stream",
+                _STREAM_STOP_TIMEOUT,
+            )
         except Exception:  # noqa: BLE001
             _LOGGER.debug("Failed to stop discarded Nanit stream", exc_info=True)
 

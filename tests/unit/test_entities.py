@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 
@@ -746,6 +747,26 @@ async def test_camera_reset_stream_service_stops_cached_stream_before_release(
     assert entity._stream_source_started_at == 0.0
     cancel.assert_called_once_with()
     assert entity._cancel_stream_expiry_timer is None
+
+
+async def test_camera_reset_stream_times_out_hung_worker_and_releases_cache(
+    hass: HomeAssistant,
+) -> None:
+    """A stuck HA stream worker must not block viewer recovery forever."""
+    coordinator = _push_coordinator(_camera_state())
+    entity = NanitCameraEntity(coordinator, MagicMock(uid="cam_1"))
+    entity.hass = hass
+    never_finishes = asyncio.Event()
+    stream = MagicMock()
+    stream.stop = AsyncMock(side_effect=never_finishes.wait)
+    cast(Any, entity).stream = stream
+    entity._stream_source_started_at = 100.0
+
+    with patch("custom_components.nanit.camera._STREAM_STOP_TIMEOUT", 0.01):
+        await asyncio.wait_for(entity._async_invalidate_stream("test timeout"), timeout=0.1)
+
+    assert entity.stream is None
+    assert entity._stream_source_started_at == 0.0
 
 
 async def test_camera_expiry_replaces_stream_with_active_outputs(
