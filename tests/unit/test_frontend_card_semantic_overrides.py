@@ -113,7 +113,8 @@ def test_card_source_recovers_stream_on_page_resume() -> None:
     assert "STREAM_VISUAL_STARTUP_RELOAD_TICKS = 30" in card
     assert "this._streamLoaded = true" in card
     assert "STREAM_STARTUP_RELOAD_TICKS = 15" in card
-    assert "STREAM_BACKEND_RESET_FALLBACK_MS = 10000" in card
+    assert "STREAM_BACKEND_RESET_FALLBACK_MS = 20000" in card
+    assert "STREAM_BACKEND_RESET_MIN_SPACING_MS = 45000" in card
     assert "this._scheduleBackendRecoveryFallback()" in card
     assert (
         "this._reloadStream()"

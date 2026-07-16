@@ -14,7 +14,11 @@ const STREAM_MAX_RELOADS = 3;
 const STREAM_RELOAD_COOLDOWN_MS = 60000;
 const STREAM_HEALTHY_RESET_TICKS = 10;
 const STREAM_PROGRESS_EPSILON = 0.05;
-const STREAM_BACKEND_RESET_FALLBACK_MS = 10000;
+// A cold RTMPS→HLS pipeline through the Nanit cloud regularly needs >10s to
+// first frame; resetting the backend before that destroys the warmup and can
+// loop forever. Wait longer, and never fire two backend resets close together.
+const STREAM_BACKEND_RESET_FALLBACK_MS = 20000;
+const STREAM_BACKEND_RESET_MIN_SPACING_MS = 45000;
 // After the app/page resumes, the previous WebRTC session is usually dead.
 // Give the existing player a short window to prove it is alive, then reload
 // immediately instead of waiting out the full stall/startup budgets.
@@ -53,6 +57,7 @@ export class NanitCard extends LitElement {
   private _resumeProbeUntil = 0;
   private _backendRecoveryFallback: number | undefined;
   private _backendRecoveryInFlight = false;
+  private _lastBackendResetAt = 0;
 
   static styles = cardStyles;
 
@@ -281,6 +286,15 @@ export class NanitCard extends LitElement {
     this._backendRecoveryFallback = window.setTimeout(() => {
       this._backendRecoveryFallback = undefined;
       if (this._streamHealthy || this._backendRecoveryInFlight) return;
+      const now = Date.now();
+      if (now - this._lastBackendResetAt < STREAM_BACKEND_RESET_MIN_SPACING_MS) {
+        // The backend was reset moments ago — its replacement stream may
+        // still be warming up. Restart only the viewer; another backend
+        // reset here would destroy the warmup and loop forever.
+        this._reloadStream();
+        return;
+      }
+      this._lastBackendResetAt = now;
       this._backendRecoveryInFlight = true;
       void this._requestBackendStreamReset()
         .catch(() => undefined)

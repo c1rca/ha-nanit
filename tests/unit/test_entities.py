@@ -699,14 +699,17 @@ def test_camera_keeps_stream_on_reconnection() -> None:
     assert entity.stream is not None
 
 
-def test_camera_invalidates_expired_stream_source() -> None:
+def test_camera_expired_stream_source_clears_cache_without_hass() -> None:
+    """Pre-hass expiry falls back to a cache-only clear, keeping the stream."""
     coordinator = _push_coordinator(_camera_state(sleep_mode=False))
     camera = MagicMock(uid="cam_1")
     entity = NanitCameraEntity(coordinator, camera)
     _disable_state_writes(entity)
     entity._handle_coordinator_update()
 
-    entity.stream = MagicMock()
+    stream = MagicMock()
+    entity.stream = stream
+    entity._cached_stream_source = "rtmps://old-url"
     with (
         patch("custom_components.nanit.camera._STREAM_SOURCE_MAX_AGE", 10.0),
         patch("custom_components.nanit.camera.time.monotonic", return_value=100.0),
@@ -714,7 +717,8 @@ def test_camera_invalidates_expired_stream_source() -> None:
         entity._stream_source_started_at = 89.0
         entity._handle_coordinator_update()
 
-    assert entity.stream is None
+    assert entity.stream is stream
+    assert entity._cached_stream_source is None
     assert entity._stream_source_started_at == 0.0
 
 
@@ -830,22 +834,58 @@ async def test_camera_reset_stream_times_out_hung_worker_and_releases_cache(
     assert entity._stream_source_started_at == 0.0
 
 
-async def test_camera_expiry_replaces_stream_with_active_outputs(
+async def test_camera_expiry_rotates_source_in_place_with_active_outputs(
     hass: HomeAssistant,
 ) -> None:
+    """An actively watched stream is renewed via update_source, never stopped.
+
+    Stopping it blanked every open card at the 45-minute mark and set off
+    the frontend recovery cascade.
+    """
     coordinator = _push_coordinator(_camera_state())
-    entity = NanitCameraEntity(coordinator, MagicMock(uid="cam_1"))
+    camera = MagicMock(uid="cam_1")
+    camera.async_get_stream_rtmps_url = AsyncMock(return_value="rtmps://renewed-url")
+    camera.async_start_streaming = AsyncMock()
+    entity = NanitCameraEntity(coordinator, camera)
     entity.hass = hass
     stream = MagicMock()
     stream.stop = AsyncMock()
     stream.outputs.return_value = {"hls": MagicMock()}
     entity.stream = stream
+    entity._cached_stream_source = "rtmps://old-url"
+    entity._stream_source_started_at = 100.0
+
+    entity._handle_stream_expiry()
+    await hass.async_block_till_done()
+
+    assert entity.stream is stream
+    stream.stop.assert_not_awaited()
+    stream.update_source.assert_called_once_with("rtmps://renewed-url")
+    assert entity._cached_stream_source == "rtmps://renewed-url"
+    assert entity._stream_source_started_at > 0.0
+    # The renewal reschedules the expiry timer — cancel it for teardown.
+    assert entity._cancel_stream_expiry_timer is not None
+    entity._cancel_stream_expiry_timer()
+    entity._cancel_stream_expiry_timer = None
+
+
+async def test_camera_expiry_discards_idle_stream(hass: HomeAssistant) -> None:
+    """Without active consumers the stale stream is dropped entirely."""
+    coordinator = _push_coordinator(_camera_state())
+    entity = NanitCameraEntity(coordinator, MagicMock(uid="cam_1"))
+    entity.hass = hass
+    stream = MagicMock()
+    stream.stop = AsyncMock()
+    stream.outputs.return_value = {}
+    entity.stream = stream
+    entity._cached_stream_source = "rtmps://old-url"
     entity._stream_source_started_at = 100.0
 
     entity._handle_stream_expiry()
     await hass.async_block_till_done()
 
     assert entity.stream is None
+    assert entity._cached_stream_source is None
     assert entity._stream_source_started_at == 0.0
     stream.stop.assert_awaited_once_with()
 

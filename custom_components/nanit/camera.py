@@ -75,6 +75,7 @@ class NanitCameraEntity(NanitEntity, Camera):
         self._cached_stream_source: str | None = None
         self._stream_source_started_at: float = 0.0
         self._cancel_stream_expiry_timer: CALLBACK_TYPE | None = None
+        self._stream_refresh_task: asyncio.Task[None] | None = None
 
     @property
     def is_on(self) -> bool:
@@ -158,13 +159,13 @@ class NanitCameraEntity(NanitEntity, Camera):
             _LOGGER.debug("Failed to stop discarded Nanit stream", exc_info=True)
 
     def _invalidate_stream_if_expired(self) -> None:
-        """Discard HA's cached stream shortly before its RTMPS token can expire."""
-        if self.stream is None or self._stream_source_started_at == 0.0:
+        """Renew or release the source shortly before its RTMPS token expires."""
+        if self._stream_source_started_at == 0.0:
             return
 
         stream_age = time.monotonic() - self._stream_source_started_at
         if stream_age >= _STREAM_SOURCE_MAX_AGE:
-            self._invalidate_stream(f"stream source age {stream_age:.0f}s")
+            self._refresh_or_expire_stream_source(f"stream source age {stream_age:.0f}s")
 
     @callback
     def close_webrtc_session(self, session_id: str) -> None:
@@ -251,11 +252,67 @@ class NanitCameraEntity(NanitEntity, Camera):
 
     @callback
     def _handle_stream_expiry(self) -> None:
-        """Discard the cached source before its embedded media token expires."""
-        if self.stream is None:
+        """Renew or release the cached source before its token expires."""
+        self._cancel_stream_expiry_timer = None
+        self._refresh_or_expire_stream_source("stream source age timer")
+
+    def _expire_stream_source(self) -> None:
+        """Drop the cached source URL without touching a running stream."""
+        self._cached_stream_source = None
+        self._stream_source_started_at = 0.0
+        if self._cancel_stream_expiry_timer is not None:
+            self._cancel_stream_expiry_timer()
             self._cancel_stream_expiry_timer = None
+
+    @callback
+    def _refresh_or_expire_stream_source(self, reason: str) -> None:
+        """Route an aging source to in-place renewal or cache discard."""
+        if self._stream_refresh_task is not None and not self._stream_refresh_task.done():
             return
-        self._invalidate_stream("stream source age timer")
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            self._expire_stream_source()
+            return
+        self._stream_refresh_task = hass.async_create_task(
+            self._async_refresh_stream_source(reason),
+            name=f"nanit_stream_source_refresh_{self._camera.uid}",
+        )
+
+    async def _async_refresh_stream_source(self, reason: str) -> None:
+        """Renew the RTMPS source URL as its embedded token ages out.
+
+        A stream with active consumers is rotated in place via
+        Stream.update_source() — stopping it would blank every open card
+        mid-viewing and set off the frontend recovery cascade. Without
+        consumers the stream and cache are discarded so the next viewer
+        starts fresh.
+        """
+        stream = self.stream
+        if self.is_on and stream is not None and stream.outputs():
+            try:
+                source = await self._camera.async_get_stream_rtmps_url()
+            except Exception:  # noqa: BLE001
+                # Leave the running stream alone — playing until the token
+                # actually dies beats killing it because renewal failed.
+                _LOGGER.warning("Failed to renew RTMPS stream URL", exc_info=True)
+                self._expire_stream_source()
+                return
+            if not await self._async_start_streaming_safe(source):
+                self._expire_stream_source()
+                return
+            _LOGGER.debug(
+                "Rotating RTMPS source in place for camera %s after %s",
+                self._camera.uid,
+                reason,
+            )
+            self._cached_stream_source = source
+            self._stream_source_started_at = time.monotonic()
+            self._schedule_stream_expiry_timer()
+            stream.update_source(source)
+            return
+
+        # No active consumers — discard so the next viewer starts fresh.
+        self._invalidate_stream(reason)
 
     async def _async_start_streaming_safe(self, rtmps_url: str | None = None) -> bool:
         """Send PUT_STREAMING with retry.  Returns True on success."""
