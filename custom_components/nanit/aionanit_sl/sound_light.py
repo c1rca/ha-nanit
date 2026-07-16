@@ -467,14 +467,18 @@ class NanitSoundLight:
             if self._token_refresh_task is None or self._token_refresh_task.done():
                 self._token_refresh_task = loop.create_task(self._token_refresh_loop())
 
-            # (Re)start poll task — cancel stale one first
-            if self._poll_task is not None and not self._poll_task.done():
-                self._poll_task.cancel()
-                try:
-                    await self._poll_task
-                except asyncio.CancelledError:
-                    pass
-            self._poll_task = loop.create_task(self._poll_loop())
+            # (Re)start poll task — cancel stale one first. When the poll loop
+            # itself triggered this connect, keep it running: cancelling the
+            # caller is swallowed at the await and would orphan the loop while
+            # a duplicate replacement is spawned.
+            if self._poll_task is not asyncio.current_task():
+                if self._poll_task is not None and not self._poll_task.done():
+                    self._poll_task.cancel()
+                    try:
+                        await self._poll_task
+                    except asyncio.CancelledError:
+                        pass
+                self._poll_task = loop.create_task(self._poll_loop())
 
             self._fire_event(SoundLightEventKind.CONNECTION_CHANGE)
 
@@ -486,8 +490,14 @@ class NanitSoundLight:
 
     async def _async_close_ws(self) -> None:
         """Close WebSocket and cancel recv/reconnect tasks."""
+        current_task = asyncio.current_task()
         for task_attr in ("_recv_task", "_reconnect_task"):
             task = getattr(self, task_attr, None)
+            # Never cancel/await the calling task itself: the reconnect loop
+            # invokes this method, and a self-cancel is swallowed at the
+            # await, leaving the loop running as an untracked orphan.
+            if task is current_task:
+                continue
             if task is not None and not task.done():
                 task.cancel()
                 try:

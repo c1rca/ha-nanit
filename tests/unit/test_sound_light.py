@@ -167,6 +167,46 @@ class TestReconnectTaskTracking:
         await sl._async_close_ws()
         assert sl._reconnect_task is None
 
+    @pytest.mark.asyncio
+    async def test_close_ws_does_not_cancel_current_task(self) -> None:
+        """Regression: the reconnect loop calls _async_close_ws; a self-cancel
+        is swallowed at the await and orphans the loop."""
+        sl = _make_sound_light()
+        current = asyncio.current_task()
+        assert current is not None
+        sl._reconnect_task = current
+
+        await asyncio.wait_for(sl._async_close_ws(), timeout=1.0)
+
+        assert sl._reconnect_task is current
+
+    @pytest.mark.asyncio
+    async def test_connect_keeps_calling_poll_task(self) -> None:
+        """Regression: the poll loop triggers _async_connect every 5 minutes;
+        cancelling the caller orphaned it while spawning a duplicate."""
+        sl = _make_sound_light(device_ip=None)
+        sl._stopped = False
+
+        mock_ws = MagicMock()
+        mock_ws.closed = False
+        mock_ws.close = AsyncMock()
+        mock_ws.__aiter__ = MagicMock(return_value=iter([]))
+        sl._session.ws_connect = AsyncMock(return_value=mock_ws)
+
+        current = asyncio.current_task()
+        assert current is not None
+        sl._poll_task = current
+
+        await asyncio.wait_for(sl._async_connect(silent=True), timeout=1.0)
+
+        # The calling poll task must remain the tracked poll task —
+        # no cancellation, no replacement task spawned.
+        assert sl._poll_task is current
+
+        # Detach before stop so async_stop doesn't cancel the test task itself.
+        sl._poll_task = None
+        await sl.async_stop()
+
 
 class TestCloudRelayPrefersDefaultTls:
     """Verify that cloud relay connections don't pass the CERT_NONE ssl context."""

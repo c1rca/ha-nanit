@@ -245,7 +245,10 @@ class TestGetHeadersCallback:
         mock_ws.__aiter__ = MagicMock(return_value=iter([]))
         session.ws_connect = AsyncMock(return_value=mock_ws)
 
-        # Run reconnect with patched sleep to avoid waiting
+        # Run reconnect with patched sleep to avoid waiting. The loop bails
+        # unless it is the registered owner, so claim ownership like
+        # _ensure_reconnect_task does.
+        t._reconnect_task = asyncio.current_task()
         with patch("aionanit.ws.transport.asyncio.sleep", new_callable=AsyncMock):
             await t._reconnect_loop()
 
@@ -272,6 +275,7 @@ class TestGetHeadersCallback:
         mock_ws.__aiter__ = MagicMock(return_value=iter([]))
         session.ws_connect = AsyncMock(return_value=mock_ws)
 
+        t._reconnect_task = asyncio.current_task()
         with patch("aionanit.ws.transport.asyncio.sleep", new_callable=AsyncMock):
             await t._reconnect_loop()
 
@@ -296,6 +300,7 @@ class TestGetHeadersCallback:
         mock_ws.__aiter__ = MagicMock(return_value=iter([]))
         session.ws_connect = AsyncMock(return_value=mock_ws)
 
+        t._reconnect_task = asyncio.current_task()
         with patch("aionanit.ws.transport.asyncio.sleep", new_callable=AsyncMock):
             await t._reconnect_loop()
 
@@ -351,6 +356,63 @@ class TestAsyncForceReconnect:
         mock_ws.close.assert_not_awaited()
 
 
+class TestScheduleReconnect:
+    async def test_schedules_loop_when_disconnected(self) -> None:
+        """schedule_reconnect starts a backoff loop for a stranded transport."""
+        t, session, *_ = _make_transport()
+        t._url = "wss://api.nanit.com/focus/cameras/cam1/user_connect"
+        t._headers = {"Authorization": "Bearer token"}
+        t._transport_kind = TransportKind.CLOUD
+        t._closed = False
+        session.ws_connect = AsyncMock(side_effect=aiohttp.ClientError("still down"))
+
+        t.schedule_reconnect()
+
+        assert t._reconnect_task is not None
+        assert not t._reconnect_task.done()
+        await t.async_close()
+
+    async def test_noop_before_first_connect(self) -> None:
+        """Without a stored URL there is nothing to retry."""
+        t, *_ = _make_transport()
+        t.schedule_reconnect()
+        assert t._reconnect_task is None
+
+    async def test_noop_after_close(self) -> None:
+        t, *_ = _make_transport()
+        t._url = "wss://api.nanit.com/focus/cameras/cam1/user_connect"
+        await t.async_close()
+
+        t.schedule_reconnect()
+
+        assert t._reconnect_task is None
+
+    async def test_noop_when_connected(self) -> None:
+        t, *_ = _make_transport()
+        t._url = "wss://api.nanit.com/focus/cameras/cam1/user_connect"
+        t._closed = False
+        mock_ws = AsyncMock(spec=aiohttp.ClientWebSocketResponse)
+        mock_ws.closed = False
+        t._ws = mock_ws
+
+        t.schedule_reconnect()
+
+        assert t._reconnect_task is None
+
+    async def test_dedupes_active_loop(self) -> None:
+        t, session, *_ = _make_transport()
+        t._url = "wss://api.nanit.com/focus/cameras/cam1/user_connect"
+        t._closed = False
+        session.ws_connect = AsyncMock(side_effect=aiohttp.ClientError("still down"))
+
+        t.schedule_reconnect()
+        first_task = t._reconnect_task
+        t.schedule_reconnect()
+
+        assert t._reconnect_task is first_task
+        await t.async_close()
+
+
 class TestReconnectSafety:
     async def test_idle_seconds_resets_after_reconnect(self) -> None:
         """A fresh socket must not inherit the previous connection's idle age."""
@@ -366,6 +428,7 @@ class TestReconnectSafety:
         mock_ws.__aiter__ = MagicMock(return_value=iter([]))
         session.ws_connect = AsyncMock(return_value=mock_ws)
 
+        t._reconnect_task = asyncio.current_task()
         await t._reconnect_loop()
 
         assert t.idle_seconds < 1.0

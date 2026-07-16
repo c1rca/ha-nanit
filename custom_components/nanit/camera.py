@@ -125,15 +125,17 @@ class NanitCameraEntity(NanitEntity, Camera):
         await self._async_invalidate_stream("frontend recovery request")
 
     async def _async_invalidate_stream(self, reason: str) -> None:
-        """Stop a cached stream before making it available for replacement."""
+        """Discard the cached stream, then stop it.
+
+        The cache slot is cleared before the (potentially multi-second)
+        stop so a viewer connecting mid-stop gets a fresh stream instead
+        of the dying one.
+        """
         old_stream = self.stream
         if old_stream is not None:
             _LOGGER.debug("Invalidating cached stream after %s", reason)
-            try:
-                await self._stop_discarded_stream(old_stream)
-            finally:
-                if self.stream is old_stream:
-                    self.stream = None
+            self.stream = None
+            await self._stop_discarded_stream(old_stream)
         self._stream_source_started_at = 0.0
         if self._cancel_stream_expiry_timer is not None:
             self._cancel_stream_expiry_timer()

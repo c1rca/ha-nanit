@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -75,7 +74,7 @@ def _make_camera(
     rest = MagicMock(spec=NanitRestClient)
     tm = MagicMock(spec=TokenManager)
     tm.async_get_access_token = AsyncMock(return_value="test_token")
-    tm._expires_at = time.monotonic() + 3600.0
+    tm.expires_in = 3600.0
 
     cam = NanitCamera(
         uid="cam_uid_1",
@@ -194,6 +193,10 @@ class TestConnectionChange:
         cam._on_connection_change(ConnectionState.RECONNECTING, TransportKind.CLOUD, "err")
         cam._on_connection_change(ConnectionState.CONNECTED, TransportKind.CLOUD, None)
         assert cam.state.connection.reconnect_attempts == 0
+        # CONNECTED after RECONNECTING spawns the re-init task, whose failed
+        # inline reconnect schedules a transport recovery loop — stop the
+        # camera so no background tasks outlive the test.
+        await cam.async_stop()
 
     async def test_disconnected_cancels_pending(self) -> None:
         cam, *_ = _make_camera()

@@ -153,6 +153,18 @@ class WsTransport:
         if self._ws is not None and not self._ws.closed:
             await self._ws.close()
 
+    def schedule_reconnect(self) -> None:
+        """Ensure a background reconnect loop is running.
+
+        Idempotent: no-op when closed, never connected (no URL to retry),
+        already connected, or a reconnect loop is already active. Callers
+        use this to restore the invariant that a disconnected transport
+        always has a reconnect loop driving recovery.
+        """
+        if self._url is None or self.connected:
+            return
+        self._ensure_reconnect_task()
+
     def _ensure_reconnect_task(self) -> None:
         """Schedule exactly one reconnect loop for concurrent failure signals."""
         if self._closed:
@@ -285,6 +297,11 @@ class WsTransport:
         backoff = _INITIAL_BACKOFF
 
         while not self._closed:
+            # Bail out if this loop was superseded (an inline connect replaced
+            # or disowned it). Closing the WebSocket here would tear down a
+            # session another caller just established.
+            if self._reconnect_task is not asyncio.current_task():
+                return
             await self._async_close_ws()
             self._on_connection_change(ConnectionState.RECONNECTING, self._transport_kind, None)
 
