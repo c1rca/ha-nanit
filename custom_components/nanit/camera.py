@@ -72,6 +72,7 @@ class NanitCameraEntity(NanitEntity, Camera):
         self._attr_unique_id = f"{camera.uid}_camera"
         self._cached_snapshot: bytes | None = None
         self._cached_snapshot_at: float = 0.0
+        self._cached_stream_source: str | None = None
         self._stream_source_started_at: float = 0.0
         self._cancel_stream_expiry_timer: CALLBACK_TYPE | None = None
 
@@ -115,6 +116,7 @@ class NanitCameraEntity(NanitEntity, Camera):
             else:
                 _LOGGER.debug("Cannot stop discarded Nanit stream before HA attach")
             self.stream = None
+        self._cached_stream_source = None
         self._stream_source_started_at = 0.0
         if self._cancel_stream_expiry_timer is not None:
             self._cancel_stream_expiry_timer()
@@ -136,6 +138,7 @@ class NanitCameraEntity(NanitEntity, Camera):
             _LOGGER.debug("Invalidating cached stream after %s", reason)
             self.stream = None
             await self._stop_discarded_stream(old_stream)
+        self._cached_stream_source = None
         self._stream_source_started_at = 0.0
         if self._cancel_stream_expiry_timer is not None:
             self._cancel_stream_expiry_timer()
@@ -182,21 +185,48 @@ class NanitCameraEntity(NanitEntity, Camera):
         already pushing to the RTMPS ingest when HA opens the connection.
         This eliminates the race condition where HA tries to connect before
         the camera has started streaming.
+
+        The URL embeds the access token, so a freshly built URL is a
+        *different* source string. HA/go2rtc treat a changed source as a new
+        stream and tear down the warm producer — several seconds of black
+        video for viewers. To keep the source stable, the URL is cached and
+        reused for repeat calls (card reloads, extra viewers, WebRTC
+        renegotiation) until the existing expiry window lapses.
         """
         if not self.is_on:
             return None
 
-        try:
-            source = await self._camera.async_get_stream_rtmps_url()
-        except Exception:  # noqa: BLE001
-            _LOGGER.warning("Failed to build RTMPS stream URL", exc_info=True)
-            return None
+        source = self._cached_stream_source
+        source_age = time.monotonic() - self._stream_source_started_at
+        if (
+            source is None
+            or self._stream_source_started_at == 0.0
+            or (source_age >= _STREAM_SOURCE_MAX_AGE)
+        ):
+            try:
+                source = await self._camera.async_get_stream_rtmps_url()
+            except Exception:  # noqa: BLE001
+                _LOGGER.warning("Failed to build RTMPS stream URL", exc_info=True)
+                return None
 
+            if not await self._async_start_streaming_safe(source):
+                return None
+
+            self._cached_stream_source = source
+            self._stream_source_started_at = time.monotonic()
+            self._schedule_stream_expiry_timer()
+            return source
+
+        # Cached URL is still valid — re-send PUT_STREAMING with the same URL
+        # so a camera that lapsed while unwatched resumes pushing, without
+        # changing the source string HA already consumes.
+        _LOGGER.debug(
+            "Reusing cached RTMPS stream URL for camera %s (age %.0fs)",
+            self._camera.uid,
+            source_age,
+        )
         if not await self._async_start_streaming_safe(source):
             return None
-
-        self._stream_source_started_at = time.monotonic()
-        self._schedule_stream_expiry_timer()
         return source
 
     def _schedule_stream_expiry_timer(self, delay: float = _STREAM_SOURCE_MAX_AGE) -> None:

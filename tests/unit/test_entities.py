@@ -482,6 +482,63 @@ async def test_camera_stream_source_returns_none_when_camera_api_fails() -> None
     assert source is None
 
 
+async def test_camera_stream_source_reuses_cached_url() -> None:
+    """Repeat calls return the same URL so go2rtc keeps its warm producer."""
+    coordinator = _push_coordinator(_camera_state(sleep_mode=False))
+    camera = MagicMock(uid="cam_1")
+    camera.async_get_stream_rtmps_url = AsyncMock(return_value="rtmps://stream-url")
+    camera.async_start_streaming = AsyncMock()
+    entity = NanitCameraEntity(coordinator, camera)
+
+    first = await entity.stream_source()
+    started_at = entity._stream_source_started_at
+    second = await entity.stream_source()
+
+    assert first == second == "rtmps://stream-url"
+    # URL built exactly once within the validity window.
+    camera.async_get_stream_rtmps_url.assert_awaited_once()
+    # PUT_STREAMING still sent per request so a lapsed camera resumes pushing.
+    assert camera.async_start_streaming.await_count == 2
+    # Cache age must keep tracking the original build time.
+    assert entity._stream_source_started_at == started_at
+
+
+async def test_camera_stream_source_rebuilds_after_max_age() -> None:
+    coordinator = _push_coordinator(_camera_state(sleep_mode=False))
+    camera = MagicMock(uid="cam_1")
+    camera.async_get_stream_rtmps_url = AsyncMock(return_value="rtmps://fresh-url")
+    camera.async_start_streaming = AsyncMock()
+    entity = NanitCameraEntity(coordinator, camera)
+    entity._cached_stream_source = "rtmps://stale-url"
+
+    with (
+        patch("custom_components.nanit.camera._STREAM_SOURCE_MAX_AGE", 10.0),
+        patch("custom_components.nanit.camera.time.monotonic", return_value=100.0),
+    ):
+        entity._stream_source_started_at = 80.0
+        source = await entity.stream_source()
+
+    assert source == "rtmps://fresh-url"
+    camera.async_get_stream_rtmps_url.assert_awaited_once()
+    assert entity._cached_stream_source == "rtmps://fresh-url"
+
+
+async def test_camera_stream_source_does_not_cache_on_start_failure() -> None:
+    """A URL whose PUT_STREAMING never succeeded must not be reused."""
+    coordinator = _push_coordinator(_camera_state(sleep_mode=False))
+    camera = MagicMock(uid="cam_1")
+    camera.async_get_stream_rtmps_url = AsyncMock(return_value="rtmps://stream-url")
+    camera.async_start_streaming = AsyncMock(side_effect=RuntimeError("ws closed"))
+    entity = NanitCameraEntity(coordinator, camera)
+
+    with patch("custom_components.nanit.camera._STREAM_RETRY_DELAY", 0):
+        source = await entity.stream_source()
+
+    assert source is None
+    assert entity._cached_stream_source is None
+    assert entity._stream_source_started_at == 0.0
+
+
 async def test_camera_start_streaming_safe_logs_failure_without_raising() -> None:
     coordinator = _push_coordinator(_camera_state(sleep_mode=False))
     camera = MagicMock(uid="cam_1")
@@ -719,11 +776,13 @@ def test_camera_invalidates_stream_on_power_state_change() -> None:
 
     mock_stream = MagicMock()
     entity.stream = mock_stream
+    entity._cached_stream_source = "rtmps://cached-url"
     entity._stream_source_started_at = 100.0
     coordinator.data = _camera_state(last_seen=t1, sleep_mode=True)
     entity._handle_coordinator_update()
 
     assert entity.stream is None
+    assert entity._cached_stream_source is None
     assert entity._stream_source_started_at == 0.0
 
 
@@ -736,6 +795,7 @@ async def test_camera_reset_stream_service_stops_cached_stream_before_release(
     stream = MagicMock()
     stream.stop = AsyncMock()
     entity.stream = stream
+    entity._cached_stream_source = "rtmps://cached-url"
     entity._stream_source_started_at = 100.0
     cancel = MagicMock()
     entity._cancel_stream_expiry_timer = cancel
@@ -744,6 +804,7 @@ async def test_camera_reset_stream_service_stops_cached_stream_before_release(
 
     stream.stop.assert_awaited_once_with()
     assert entity.stream is None
+    assert entity._cached_stream_source is None
     assert entity._stream_source_started_at == 0.0
     cancel.assert_called_once_with()
     assert entity._cancel_stream_expiry_timer is None

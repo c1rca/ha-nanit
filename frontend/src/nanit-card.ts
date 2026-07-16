@@ -15,6 +15,14 @@ const STREAM_RELOAD_COOLDOWN_MS = 60000;
 const STREAM_HEALTHY_RESET_TICKS = 10;
 const STREAM_PROGRESS_EPSILON = 0.05;
 const STREAM_BACKEND_RESET_FALLBACK_MS = 10000;
+// After the app/page resumes, the previous WebRTC session is usually dead.
+// Give the existing player a short window to prove it is alive, then reload
+// immediately instead of waiting out the full stall/startup budgets.
+const STREAM_RESUME_PROBE_TICKS = 3;
+const STREAM_RESUME_PROBE_WINDOW_MS = 6000;
+// Re-arm the resume probe after this long, so back-to-back app reopens each
+// get a fast verdict. Reload churn stays capped by the reload budget below.
+const STREAM_RESUME_PROBE_COOLDOWN_MS = 10000;
 const STREAM_VISUAL_READY_SELECTORS = "video, img, canvas, ha-hls-player, ha-web-rtc-player";
 // Hide the loader quickly when HA has mounted a stream/player element, while
 // the stricter liveness watchdog continues in the background for self-healing.
@@ -42,6 +50,7 @@ export class NanitCard extends LitElement {
   private _watchedEpoch = -1;
   private _recoveringStream = false;
   private _resumeRecoverUntil = 0;
+  private _resumeProbeUntil = 0;
   private _backendRecoveryFallback: number | undefined;
   private _backendRecoveryInFlight = false;
 
@@ -167,6 +176,14 @@ export class NanitCard extends LitElement {
     return null;
   }
 
+  // During the post-resume probe window a dead player gets a fast verdict;
+  // outside it, the normal (patient) budgets apply.
+  private _strikeThreshold(base: number): number {
+    return Date.now() < this._resumeProbeUntil
+      ? Math.min(base, STREAM_RESUME_PROBE_TICKS)
+      : base;
+  }
+
   private _checkStreamLiveness(): void {
     const streamEl = this.renderRoot.querySelector("ha-camera-stream");
     if (!streamEl) return;
@@ -192,7 +209,7 @@ export class NanitCard extends LitElement {
       const threshold = hasVisualStream
         ? STREAM_VISUAL_STARTUP_RELOAD_TICKS
         : STREAM_STARTUP_RELOAD_TICKS;
-      if (this._startupStrikes >= threshold) void this._recoverStream();
+      if (this._startupStrikes >= this._strikeThreshold(threshold)) void this._recoverStream();
       return;
     }
 
@@ -205,7 +222,9 @@ export class NanitCard extends LitElement {
 
     if (video.readyState < 2) {
       this._startupStrikes += 1;
-      if (this._startupStrikes >= STREAM_STARTUP_RELOAD_TICKS) void this._recoverStream();
+      if (this._startupStrikes >= this._strikeThreshold(STREAM_STARTUP_RELOAD_TICKS)) {
+        void this._recoverStream();
+      }
       return;
     }
 
@@ -232,12 +251,14 @@ export class NanitCard extends LitElement {
 
     if (!this._sawProgress) {
       this._startupStrikes += 1;
-      if (this._startupStrikes >= STREAM_STARTUP_RELOAD_TICKS) void this._recoverStream();
+      if (this._startupStrikes >= this._strikeThreshold(STREAM_STARTUP_RELOAD_TICKS)) {
+        void this._recoverStream();
+      }
       return;
     }
 
     this._stallStrikes += 1;
-    if (this._stallStrikes >= STREAM_STALL_TICKS) void this._recoverStream();
+    if (this._stallStrikes >= this._strikeThreshold(STREAM_STALL_TICKS)) void this._recoverStream();
   }
 
   private _requestBackendStreamReset(): Promise<void> {
@@ -290,12 +311,21 @@ export class NanitCard extends LitElement {
     const streamEl = this.renderRoot.querySelector("ha-camera-stream");
     if (!streamEl) return;
 
+    // A suspended tab often just pauses the <video>; resuming it in place is
+    // instant, while a remount takes seconds. Safe no-op when already playing.
+    const video = this._findStreamVideo(streamEl);
+    if (video?.paused) void video.play().catch(() => undefined);
+
     const now = Date.now();
     if (now < this._resumeRecoverUntil) return;
-    this._resumeRecoverUntil = now + STREAM_RELOAD_COOLDOWN_MS;
+    this._resumeRecoverUntil = now + STREAM_RESUME_PROBE_COOLDOWN_MS;
     this._startupStrikes = 0;
     this._stallStrikes = 0;
     this._healthyTicks = 0;
+    // Judge progress from the current position — pre-suspend history must not
+    // count for or against the probe verdict.
+    if (video) this._lastVideoTime = video.currentTime;
+    this._resumeProbeUntil = now + STREAM_RESUME_PROBE_WINDOW_MS;
     this._checkStreamLiveness();
   };
 
@@ -325,6 +355,9 @@ export class NanitCard extends LitElement {
     this._stallStrikes = 0;
     this._startupStrikes = 0;
     this._healthyTicks = 0;
+    // The fresh player warms up under the normal startup budget — the fast
+    // probe only accelerates the verdict on the pre-resume player.
+    this._resumeProbeUntil = 0;
   }
 
 
@@ -340,6 +373,7 @@ export class NanitCard extends LitElement {
     this._healthyTicks = 0;
     this._reloadWindowStart = 0;
     this._resumeRecoverUntil = 0;
+    this._resumeProbeUntil = 0;
     this._streamMountedAt = 0;
     this._watchedEpoch = -1;
   }
