@@ -25,6 +25,9 @@ _LOGGER = logging.getLogger(__name__)
 _STREAM_START_ATTEMPTS = 3
 _STREAM_RETRY_DELAY = 2.0
 _STREAM_SOURCE_MAX_AGE = 45 * 60
+# Nanit stops the camera's RTMPS push ~20 minutes after the last
+# PUT_STREAMING; keepalives must land well inside that window.
+_STREAM_KEEPALIVE_INTERVAL = 5 * 60
 _STREAM_STOP_TIMEOUT = 5.0
 _SNAPSHOT_CACHE_TTL = 60.0
 _SNAPSHOT_PREFETCH_AGE = 30.0
@@ -75,7 +78,9 @@ class NanitCameraEntity(NanitEntity, Camera):
         self._cached_stream_source: str | None = None
         self._stream_source_started_at: float = 0.0
         self._cancel_stream_expiry_timer: CALLBACK_TYPE | None = None
+        self._cancel_stream_keepalive_timer: CALLBACK_TYPE | None = None
         self._stream_refresh_task: asyncio.Task[None] | None = None
+        self._stream_keepalive_task: asyncio.Task[bool] | None = None
 
     @property
     def is_on(self) -> bool:
@@ -119,9 +124,7 @@ class NanitCameraEntity(NanitEntity, Camera):
             self.stream = None
         self._cached_stream_source = None
         self._stream_source_started_at = 0.0
-        if self._cancel_stream_expiry_timer is not None:
-            self._cancel_stream_expiry_timer()
-            self._cancel_stream_expiry_timer = None
+        self._cancel_stream_timers()
 
     async def async_reset_stream(self) -> None:
         """Reset HA's cached Nanit stream so the next viewer gets a fresh RTMPS URL."""
@@ -141,9 +144,7 @@ class NanitCameraEntity(NanitEntity, Camera):
             await self._stop_discarded_stream(old_stream)
         self._cached_stream_source = None
         self._stream_source_started_at = 0.0
-        if self._cancel_stream_expiry_timer is not None:
-            self._cancel_stream_expiry_timer()
-            self._cancel_stream_expiry_timer = None
+        self._cancel_stream_timers()
 
     async def _stop_discarded_stream(self, stream: Any) -> None:
         """Best-effort cleanup for a stream removed from HA's cache."""
@@ -216,6 +217,7 @@ class NanitCameraEntity(NanitEntity, Camera):
             self._cached_stream_source = source
             self._stream_source_started_at = time.monotonic()
             self._schedule_stream_expiry_timer()
+            self._schedule_stream_keepalive_timer()
             return source
 
         # Cached URL is still valid — re-send PUT_STREAMING with the same URL
@@ -228,6 +230,8 @@ class NanitCameraEntity(NanitEntity, Camera):
         )
         if not await self._async_start_streaming_safe(source):
             return None
+        # PUT_STREAMING just went out — restart the keepalive countdown.
+        self._schedule_stream_keepalive_timer()
         return source
 
     def _schedule_stream_expiry_timer(self, delay: float = _STREAM_SOURCE_MAX_AGE) -> None:
@@ -250,6 +254,54 @@ class NanitCameraEntity(NanitEntity, Camera):
             self._handle_stream_expiry,
         )
 
+    def _schedule_stream_keepalive_timer(self) -> None:
+        """Schedule the next PUT_STREAMING keepalive for the cached source."""
+        if self._cancel_stream_keepalive_timer is not None:
+            self._cancel_stream_keepalive_timer()
+        try:
+            hass = self.hass
+        except (AttributeError, RuntimeError):
+            self._cancel_stream_keepalive_timer = None
+            return
+
+        if hass is None:
+            self._cancel_stream_keepalive_timer = None
+            return
+
+        self._cancel_stream_keepalive_timer = async_call_later(
+            hass,
+            _STREAM_KEEPALIVE_INTERVAL,
+            self._handle_stream_keepalive,
+        )
+
+    @callback
+    def _handle_stream_keepalive(self, _now: object = None) -> None:
+        """Re-send PUT_STREAMING so the camera's push outlives Nanit's session.
+
+        The camera stops pushing to the RTMPS ingest roughly 20 minutes
+        after the last PUT_STREAMING. Without a keepalive, every
+        continuously watched stream starves at that mark, trips HA's 30s
+        demux timeout ("Immediate exit requested"), and drops frames until
+        frontend recovery re-requests the stream. Only streams with active
+        consumers are kept alive — an idle camera is left to lapse.
+        """
+        self._cancel_stream_keepalive_timer = None
+        source = self._cached_stream_source
+        if source is None:
+            return
+        stream = self.stream
+        if (
+            self.is_on
+            and stream is not None
+            and stream.outputs()
+            and (self._stream_keepalive_task is None or self._stream_keepalive_task.done())
+        ):
+            self._stream_keepalive_task = self.hass.async_create_task(
+                self._async_start_streaming_safe(source),
+                name=f"nanit_stream_keepalive_{self._camera.uid}",
+            )
+        self._schedule_stream_keepalive_timer()
+
     @callback
     def _handle_stream_expiry(self, _now: object = None) -> None:
         """Renew or release the cached source before its token expires."""
@@ -260,9 +312,17 @@ class NanitCameraEntity(NanitEntity, Camera):
         """Drop the cached source URL without touching a running stream."""
         self._cached_stream_source = None
         self._stream_source_started_at = 0.0
+        self._cancel_stream_timers()
+
+    @callback
+    def _cancel_stream_timers(self) -> None:
+        """Cancel the expiry and keepalive timers for the cached source."""
         if self._cancel_stream_expiry_timer is not None:
             self._cancel_stream_expiry_timer()
             self._cancel_stream_expiry_timer = None
+        if self._cancel_stream_keepalive_timer is not None:
+            self._cancel_stream_keepalive_timer()
+            self._cancel_stream_keepalive_timer = None
 
     @callback
     def _refresh_or_expire_stream_source(self, reason: str) -> None:
@@ -308,6 +368,7 @@ class NanitCameraEntity(NanitEntity, Camera):
             self._cached_stream_source = source
             self._stream_source_started_at = time.monotonic()
             self._schedule_stream_expiry_timer()
+            self._schedule_stream_keepalive_timer()
             stream.update_source(source)
             return
 

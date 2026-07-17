@@ -760,13 +760,15 @@ async def test_camera_stream_source_schedules_backend_expiry_timer(
         source = await entity.stream_source()
 
     assert source == "rtmps://stream-url"
-    mock_call_later.assert_called_once()
-    assert mock_call_later.call_args.args[0] is hass
-    assert mock_call_later.call_args.args[1] == 45 * 60
-    # The scheduled target must be an event-loop callback — a bare lambda
-    # would be classified as an executor job and fire in a worker thread.
-    assert is_callback(mock_call_later.call_args.args[2])
+    delays = [call.args[1] for call in mock_call_later.call_args_list]
+    assert delays == [45 * 60, 5 * 60]  # expiry timer, then keepalive timer
+    for call in mock_call_later.call_args_list:
+        assert call.args[0] is hass
+        # The scheduled target must be an event-loop callback — a bare lambda
+        # would be classified as an executor job and fire in a worker thread.
+        assert is_callback(call.args[2])
     assert entity._cancel_stream_expiry_timer is cancel_timer
+    assert entity._cancel_stream_keepalive_timer is cancel_timer
 
 
 def test_camera_invalidates_stream_on_power_state_change() -> None:
@@ -866,10 +868,10 @@ async def test_camera_expiry_rotates_source_in_place_with_active_outputs(
     stream.update_source.assert_called_once_with("rtmps://renewed-url")
     assert entity._cached_stream_source == "rtmps://renewed-url"
     assert entity._stream_source_started_at > 0.0
-    # The renewal reschedules the expiry timer — cancel it for teardown.
+    # The renewal reschedules the expiry and keepalive timers — cancel for teardown.
     assert entity._cancel_stream_expiry_timer is not None
-    entity._cancel_stream_expiry_timer()
-    entity._cancel_stream_expiry_timer = None
+    assert entity._cancel_stream_keepalive_timer is not None
+    entity._cancel_stream_timers()
 
 
 async def test_camera_expiry_discards_idle_stream(hass: HomeAssistant) -> None:
@@ -891,6 +893,103 @@ async def test_camera_expiry_discards_idle_stream(hass: HomeAssistant) -> None:
     assert entity._cached_stream_source is None
     assert entity._stream_source_started_at == 0.0
     stream.stop.assert_awaited_once_with()
+
+
+async def test_camera_keepalive_resends_put_streaming_for_watched_stream(
+    hass: HomeAssistant,
+) -> None:
+    """Nanit drops the RTMPS push ~20 min after the last PUT_STREAMING.
+
+    A watched stream must be kept alive with periodic PUT_STREAMING or it
+    starves and trips HA's demux timeout.
+    """
+    coordinator = _push_coordinator(_camera_state())
+    camera = MagicMock(uid="cam_1")
+    camera.async_start_streaming = AsyncMock()
+    entity = NanitCameraEntity(coordinator, camera)
+    entity.hass = hass
+    stream = MagicMock()
+    stream.outputs.return_value = {"hls": MagicMock()}
+    entity.stream = stream
+    entity._cached_stream_source = "rtmps://cached-url"
+    entity._stream_source_started_at = 100.0
+    cancel_timer = MagicMock()
+
+    with patch(
+        "custom_components.nanit.camera.async_call_later",
+        return_value=cancel_timer,
+    ) as mock_call_later:
+        entity._handle_stream_keepalive()
+        await hass.async_block_till_done()
+
+    camera.async_start_streaming.assert_awaited_once_with(rtmps_url="rtmps://cached-url")
+    # The keepalive must reschedule itself for the next interval.
+    mock_call_later.assert_called_once()
+    assert mock_call_later.call_args.args[1] == 5 * 60
+    assert is_callback(mock_call_later.call_args.args[2])
+    assert entity._cancel_stream_keepalive_timer is cancel_timer
+
+
+async def test_camera_keepalive_skips_idle_stream_but_reschedules(
+    hass: HomeAssistant,
+) -> None:
+    """Without consumers the camera is left to lapse — no PUT_STREAMING."""
+    coordinator = _push_coordinator(_camera_state())
+    camera = MagicMock(uid="cam_1")
+    camera.async_start_streaming = AsyncMock()
+    entity = NanitCameraEntity(coordinator, camera)
+    entity.hass = hass
+    stream = MagicMock()
+    stream.outputs.return_value = {}
+    entity.stream = stream
+    entity._cached_stream_source = "rtmps://cached-url"
+    entity._stream_source_started_at = 100.0
+
+    with patch("custom_components.nanit.camera.async_call_later") as mock_call_later:
+        entity._handle_stream_keepalive()
+        await hass.async_block_till_done()
+
+    camera.async_start_streaming.assert_not_awaited()
+    mock_call_later.assert_called_once()
+
+
+async def test_camera_keepalive_stops_after_source_invalidation(
+    hass: HomeAssistant,
+) -> None:
+    """A keepalive firing after invalidation must not resurrect the timer."""
+    coordinator = _push_coordinator(_camera_state())
+    camera = MagicMock(uid="cam_1")
+    camera.async_start_streaming = AsyncMock()
+    entity = NanitCameraEntity(coordinator, camera)
+    entity.hass = hass
+
+    with patch("custom_components.nanit.camera.async_call_later") as mock_call_later:
+        entity._handle_stream_keepalive()
+        await hass.async_block_till_done()
+
+    camera.async_start_streaming.assert_not_awaited()
+    mock_call_later.assert_not_called()
+
+
+async def test_camera_stream_invalidation_cancels_keepalive_timer(
+    hass: HomeAssistant,
+) -> None:
+    coordinator = _push_coordinator(_camera_state())
+    entity = NanitCameraEntity(coordinator, MagicMock(uid="cam_1"))
+    entity.hass = hass
+    cancel_expiry = MagicMock()
+    cancel_keepalive = MagicMock()
+    entity._cancel_stream_expiry_timer = cancel_expiry
+    entity._cancel_stream_keepalive_timer = cancel_keepalive
+    entity._cached_stream_source = "rtmps://cached-url"
+    entity._stream_source_started_at = 100.0
+
+    entity._expire_stream_source()
+
+    cancel_expiry.assert_called_once_with()
+    cancel_keepalive.assert_called_once_with()
+    assert entity._cancel_stream_expiry_timer is None
+    assert entity._cancel_stream_keepalive_timer is None
 
 
 async def test_camera_start_streaming_safe_falls_back_for_legacy_client_signature() -> None:
