@@ -772,6 +772,11 @@ class NanitCamera:
         retry after inline reconnect so that commands succeed even when the
         server-side session has silently expired.
         """
+        if self._stopped:
+            # Fail fast: late callers (leaked timers, in-flight tasks) must
+            # not wait out the connect timeout or trigger a reconnect.
+            raise NanitCameraUnavailable(f"Camera {self._uid} is stopped")
+
         if not self._transport.connected:
             try:
                 await asyncio.wait_for(self._connected_event.wait(), timeout=15.0)
@@ -962,11 +967,22 @@ class NanitCamera:
         with the current connection and let the retry logic handle any
         remaining failures.
         """
+        if self._stopped:
+            # A stopped camera must stay stopped: reconnecting here would
+            # resurrect the WebSocket and background loops with nothing left
+            # to ever tear them down (e.g. a leaked keepalive firing after a
+            # config-entry reload).
+            _LOGGER.debug("Camera %s is stopped — skipping inline reconnect", self._uid)
+            return
+
         if self._reconnect_lock.locked():
             _LOGGER.debug("Reconnect already in progress, skipping")
             return
 
         async with self._reconnect_lock:
+            # Re-check: async_stop may have run while awaiting the lock.
+            if self._stopped:
+                return
             # Skip if another caller already reconnected.
             if (
                 not force

@@ -20,6 +20,7 @@ from aionanit.camera import (
     _parse_status_from_proto,
 )
 from aionanit.exceptions import (
+    NanitCameraUnavailable,
     NanitRequestTimeout,
     NanitTransportError,
 )
@@ -987,6 +988,44 @@ class TestAsyncStop:
         assert cam._stopped is True
         assert future.done()
         cam._transport.async_close.assert_awaited_once()
+
+    async def test_send_request_fails_fast_after_stop(self) -> None:
+        """Late callers on a stopped camera must not wait or reconnect."""
+        cam, *_ = _make_camera()
+        cam._transport = MagicMock()
+        cam._transport.connected = False
+        cam._transport.async_close = AsyncMock()
+        cam._async_reconnect = AsyncMock()
+
+        await cam.async_stop()
+
+        with pytest.raises(NanitCameraUnavailable, match="stopped"):
+            await cam._send_request(
+                RequestType.GET_STATUS,
+                get_status=GetStatus(all=True),
+            )
+
+        cam._async_reconnect.assert_not_awaited()
+
+    async def test_perform_reconnect_is_noop_after_stop(self) -> None:
+        """A leaked timer firing after shutdown must not resurrect the transport.
+
+        Without this guard, a keepalive that outlives a config-entry reload
+        reconnects the stopped camera's WebSocket — with nothing left to ever
+        tear it down — and redirects the camera's RTMPS push to a stale URL.
+        """
+        cam, *_ = _make_camera()
+        cam._transport = MagicMock()
+        cam._transport.connected = False
+        cam._transport.async_close = AsyncMock()
+        cam._transport.async_connect_cloud = AsyncMock()
+        cam._transport.async_connect_local = AsyncMock()
+
+        await cam.async_stop()
+        await cam._perform_reconnect()
+
+        cam._transport.async_connect_cloud.assert_not_awaited()
+        cam._transport.async_connect_local.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

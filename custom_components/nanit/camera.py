@@ -124,6 +124,23 @@ class NanitCameraEntity(NanitEntity, Camera):
 
         super()._handle_coordinator_update()
 
+    async def async_will_remove_from_hass(self) -> None:
+        """Tear down stream bookkeeping so nothing outlives the entity.
+
+        The keepalive timer reschedules itself indefinitely; without this it
+        survives a config-entry reload and keeps firing on the removed
+        entity — re-sending PUT_STREAMING with a stale URL through the old
+        (stopped) camera, which resurrects its WebSocket and redirects the
+        camera's push away from the replacement entity's stream.
+        """
+        self._invalidate_stream("entity removal")
+        for task in (self._stream_refresh_task, self._stream_keepalive_task):
+            if task is not None and not task.done():
+                task.cancel()
+        self._stream_refresh_task = None
+        self._stream_keepalive_task = None
+        await super().async_will_remove_from_hass()
+
     def _invalidate_stream(self, reason: str = "state change") -> None:
         """Stop and discard HA's cached stream so a fresh one can be created."""
         if self.stream is not None:

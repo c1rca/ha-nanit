@@ -1077,6 +1077,51 @@ async def test_camera_stream_invalidation_cancels_keepalive_timer(
     assert entity._cancel_stream_keepalive_timer is None
 
 
+async def test_camera_removal_cancels_stream_timers_and_tasks(
+    hass: HomeAssistant,
+) -> None:
+    """Removal must leave nothing behind that can fire after a reload.
+
+    The keepalive timer reschedules itself indefinitely; if it survives
+    entity removal it re-sends PUT_STREAMING with a stale URL through the
+    old (stopped) camera, resurrecting its WebSocket and redirecting the
+    camera's push away from the replacement entity's stream.
+    """
+    coordinator = _push_coordinator(_camera_state())
+    camera = MagicMock(uid="cam_1")
+    entity = NanitCameraEntity(coordinator, camera)
+    entity.hass = hass
+    stream = MagicMock()
+    stream.stop = AsyncMock()
+    entity.stream = stream
+    entity._cached_stream_source = "rtmps://cached-url"
+    entity._stream_source_started_at = 100.0
+    cancel_expiry = MagicMock()
+    cancel_keepalive = MagicMock()
+    entity._cancel_stream_expiry_timer = cancel_expiry
+    entity._cancel_stream_keepalive_timer = cancel_keepalive
+    keepalive_task = MagicMock()
+    keepalive_task.done.return_value = False
+    entity._stream_keepalive_task = keepalive_task
+    refresh_task = MagicMock()
+    refresh_task.done.return_value = False
+    entity._stream_refresh_task = refresh_task
+
+    await entity.async_will_remove_from_hass()
+    await hass.async_block_till_done()
+
+    cancel_expiry.assert_called_once_with()
+    cancel_keepalive.assert_called_once_with()
+    keepalive_task.cancel.assert_called_once_with()
+    refresh_task.cancel.assert_called_once_with()
+    assert entity._stream_keepalive_task is None
+    assert entity._stream_refresh_task is None
+    assert entity._cached_stream_source is None
+    assert entity._stream_source_started_at == 0.0
+    assert entity.stream is None
+    stream.stop.assert_awaited_once_with()
+
+
 async def test_camera_start_streaming_safe_falls_back_for_legacy_client_signature() -> None:
     coordinator = _push_coordinator(_camera_state(sleep_mode=False))
     camera = MagicMock(uid="cam_1")
