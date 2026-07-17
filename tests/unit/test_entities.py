@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.components.media_player import MediaPlayerState
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, is_callback
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 _ = sys.modules.setdefault("turbojpeg", MagicMock(TurboJPEG=MagicMock()))
@@ -763,6 +763,9 @@ async def test_camera_stream_source_schedules_backend_expiry_timer(
     mock_call_later.assert_called_once()
     assert mock_call_later.call_args.args[0] is hass
     assert mock_call_later.call_args.args[1] == 45 * 60
+    # The scheduled target must be an event-loop callback — a bare lambda
+    # would be classified as an executor job and fire in a worker thread.
+    assert is_callback(mock_call_later.call_args.args[2])
     assert entity._cancel_stream_expiry_timer is cancel_timer
 
 

@@ -247,11 +247,11 @@ class NanitCameraEntity(NanitEntity, Camera):
         self._cancel_stream_expiry_timer = async_call_later(
             hass,
             delay,
-            lambda _now: self._handle_stream_expiry(),
+            self._handle_stream_expiry,
         )
 
     @callback
-    def _handle_stream_expiry(self) -> None:
+    def _handle_stream_expiry(self, _now: object = None) -> None:
         """Renew or release the cached source before its token expires."""
         self._cancel_stream_expiry_timer = None
         self._refresh_or_expire_stream_source("stream source age timer")
