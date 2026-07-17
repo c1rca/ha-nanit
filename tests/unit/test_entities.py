@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+import time
 
 # pyright: basic, reportUnusedFunction=false
 from collections.abc import Iterator
@@ -969,6 +970,84 @@ async def test_camera_keepalive_stops_after_source_invalidation(
 
     camera.async_start_streaming.assert_not_awaited()
     mock_call_later.assert_not_called()
+
+
+async def test_camera_reconnect_resumes_watched_stream_push(
+    hass: HomeAssistant,
+) -> None:
+    """The camera's RTMPS push dies with its control session.
+
+    aionanit's reconnect handler does not re-send PUT_STREAMING (e.g. after
+    the pre-emptive token-refresh reconnect), so the entity must resume the
+    push on the reconnect transition before HA's 30s demux timeout starves
+    viewers.
+    """
+    coordinator = _push_coordinator(_camera_state(connection_state=ConnectionState.RECONNECTING))
+    camera = MagicMock(uid="cam_1")
+    camera.async_start_streaming = AsyncMock()
+    entity = NanitCameraEntity(coordinator, camera)
+    entity.hass = hass
+    _disable_state_writes(entity)
+    stream = MagicMock()
+    stream.outputs.return_value = {"hls": MagicMock()}
+    entity.stream = stream
+    entity._cached_stream_source = "rtmps://cached-url"
+    # Fresh timestamp so the age-based expiry path stays out of the way.
+    entity._stream_source_started_at = time.monotonic()
+
+    entity._handle_coordinator_update()  # observes RECONNECTING
+    camera.async_start_streaming.assert_not_awaited()
+
+    coordinator.data = _camera_state(connection_state=ConnectionState.CONNECTED)
+    entity._handle_coordinator_update()  # RECONNECTING -> CONNECTED
+    await hass.async_block_till_done()
+
+    camera.async_start_streaming.assert_awaited_once_with(rtmps_url="rtmps://cached-url")
+    # Cancel the rescheduled keepalive timer for teardown.
+    entity._cancel_stream_timers()
+
+
+async def test_camera_steady_connected_updates_do_not_resend_put_streaming(
+    hass: HomeAssistant,
+) -> None:
+    """Routine push events while CONNECTED must not spam PUT_STREAMING."""
+    coordinator = _push_coordinator(_camera_state(connection_state=ConnectionState.CONNECTED))
+    camera = MagicMock(uid="cam_1")
+    camera.async_start_streaming = AsyncMock()
+    entity = NanitCameraEntity(coordinator, camera)
+    entity.hass = hass
+    _disable_state_writes(entity)
+    stream = MagicMock()
+    stream.outputs.return_value = {"hls": MagicMock()}
+    entity.stream = stream
+    entity._cached_stream_source = "rtmps://cached-url"
+    entity._stream_source_started_at = time.monotonic()
+
+    entity._handle_coordinator_update()
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+
+    camera.async_start_streaming.assert_not_awaited()
+    assert entity._cancel_stream_keepalive_timer is None
+
+
+async def test_camera_reconnect_without_cached_source_is_noop(
+    hass: HomeAssistant,
+) -> None:
+    coordinator = _push_coordinator(_camera_state(connection_state=ConnectionState.RECONNECTING))
+    camera = MagicMock(uid="cam_1")
+    camera.async_start_streaming = AsyncMock()
+    entity = NanitCameraEntity(coordinator, camera)
+    entity.hass = hass
+    _disable_state_writes(entity)
+
+    entity._handle_coordinator_update()
+    coordinator.data = _camera_state(connection_state=ConnectionState.CONNECTED)
+    entity._handle_coordinator_update()
+    await hass.async_block_till_done()
+
+    camera.async_start_streaming.assert_not_awaited()
+    assert entity._cancel_stream_keepalive_timer is None
 
 
 async def test_camera_stream_invalidation_cancels_keepalive_timer(

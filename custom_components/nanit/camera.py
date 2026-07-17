@@ -13,6 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback, async_get
 from homeassistant.helpers.event import async_call_later
 
 from aionanit import NanitCamera
+from aionanit.models import ConnectionState
 
 from . import NanitConfigEntry
 from .coordinator import NanitPushCoordinator
@@ -72,6 +73,7 @@ class NanitCameraEntity(NanitEntity, Camera):
         Camera.__init__(self)
         self._camera = camera
         self._prev_is_on: bool | None = None
+        self._prev_conn_state: ConnectionState | None = None
         self._attr_unique_id = f"{camera.uid}_camera"
         self._cached_snapshot: bytes | None = None
         self._cached_snapshot_at: float = 0.0
@@ -98,11 +100,27 @@ class NanitCameraEntity(NanitEntity, Camera):
         prev_on = self._prev_is_on
         self._prev_is_on = cur_on
 
+        data = self.coordinator.data
+        conn_state = data.connection.state if data is not None else None
+        prev_conn_state = self._prev_conn_state
+        self._prev_conn_state = conn_state
+
         if prev_on is not None and prev_on != cur_on:
             # Camera power changed — invalidate cached stream.
             self._invalidate_stream("power state change")
         else:
             self._invalidate_stream_if_expired()
+
+        if (
+            conn_state is ConnectionState.CONNECTED
+            and prev_conn_state is not None
+            and prev_conn_state is not ConnectionState.CONNECTED
+        ):
+            # The camera's RTMPS push dies with its control session (e.g. the
+            # pre-emptive token-refresh reconnect) and aionanit's reconnect
+            # handler does not re-send PUT_STREAMING. Resume the push now so
+            # watched streams recover well inside HA's 30s demux timeout.
+            self._handle_stream_keepalive()
 
         super()._handle_coordinator_update()
 
@@ -284,8 +302,13 @@ class NanitCameraEntity(NanitEntity, Camera):
         demux timeout ("Immediate exit requested"), and drops frames until
         frontend recovery re-requests the stream. Only streams with active
         consumers are kept alive — an idle camera is left to lapse.
+
+        Also invoked directly on reconnect transitions to resume the push
+        immediately; the pending timer is cancelled so it cannot double up.
         """
-        self._cancel_stream_keepalive_timer = None
+        if self._cancel_stream_keepalive_timer is not None:
+            self._cancel_stream_keepalive_timer()
+            self._cancel_stream_keepalive_timer = None
         source = self._cached_stream_source
         if source is None:
             return
