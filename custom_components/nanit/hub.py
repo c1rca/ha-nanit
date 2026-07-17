@@ -178,11 +178,13 @@ class NanitHub:
             if isinstance(result, NanitAuthError):
                 raise result
             if isinstance(result, NanitConnectionError | NanitCameraUnavailable | TimeoutError):
+                # getattr: published aionanit 1.8.7 wheels predate camera_connected.
+                cloud_connected = getattr(baby, "camera_connected", None)
                 cloud_status = (
                     "cloud reports connected=True (transient failure?)"
-                    if baby.camera_connected is True
+                    if cloud_connected is True
                     else "cloud reports connected=False (camera offline)"
-                    if baby.camera_connected is False
+                    if cloud_connected is False
                     else "cloud connected status unknown"
                 )
                 _LOGGER.warning(
