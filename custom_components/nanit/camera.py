@@ -305,6 +305,12 @@ class NanitCameraEntity(NanitEntity, Camera):
 
         Also invoked directly on reconnect transitions to resume the push
         immediately; the pending timer is cancelled so it cannot double up.
+
+        The send is best-effort (no reconnect-on-failure): forcing a control
+        reconnect on a late ACK would itself kill the RTMPS push and re-enter
+        this handler on the reconnect transition — an endless teardown loop.
+        A genuinely dead session is still recovered by aionanit's periodic
+        health check, whose reconnect lands back here to resume the push.
         """
         if self._cancel_stream_keepalive_timer is not None:
             self._cancel_stream_keepalive_timer()
@@ -320,7 +326,7 @@ class NanitCameraEntity(NanitEntity, Camera):
             and (self._stream_keepalive_task is None or self._stream_keepalive_task.done())
         ):
             self._stream_keepalive_task = self.hass.async_create_task(
-                self._async_start_streaming_safe(source),
+                self._async_start_streaming_safe(source, reconnect_on_failure=False),
                 name=f"nanit_stream_keepalive_{self._camera.uid}",
             )
         self._schedule_stream_keepalive_timer()
@@ -398,21 +404,24 @@ class NanitCameraEntity(NanitEntity, Camera):
         # No active consumers — discard so the next viewer starts fresh.
         self._invalidate_stream(reason)
 
-    async def _async_start_streaming_safe(self, rtmps_url: str | None = None) -> bool:
-        """Send PUT_STREAMING with retry.  Returns True on success."""
+    async def _async_start_streaming_safe(
+        self,
+        rtmps_url: str | None = None,
+        *,
+        reconnect_on_failure: bool = True,
+    ) -> bool:
+        """Send PUT_STREAMING with retry.  Returns True on success.
+
+        ``reconnect_on_failure=False`` makes each send best-effort: aionanit
+        will not force-reconnect the control WebSocket when the ACK is late.
+        Background keepalives must use this — a control-session reconnect
+        stops the camera's RTMPS push, so a keepalive that reconnects on a
+        slow ACK tears down the very stream it is keeping alive and loops
+        (reconnect → resume PUT_STREAMING → slow ACK → reconnect …).
+        """
         for attempt in range(1, _STREAM_START_ATTEMPTS + 1):
             try:
-                try:
-                    await self._camera.async_start_streaming(rtmps_url=rtmps_url)
-                except TypeError as err:
-                    if "rtmps_url" not in str(err):
-                        raise
-                    _LOGGER.debug(
-                        "Nanit client does not support explicit RTMPS URL reuse; "
-                        "falling back to legacy stream start for camera %s",
-                        self._camera.uid,
-                    )
-                    await self._camera.async_start_streaming()
+                await self._async_send_put_streaming(rtmps_url, reconnect_on_failure)
                 return True
             except Exception:  # noqa: BLE001
                 if attempt < _STREAM_START_ATTEMPTS:
@@ -432,6 +441,36 @@ class NanitCameraEntity(NanitEntity, Camera):
                         exc_info=True,
                     )
         return False
+
+    async def _async_send_put_streaming(
+        self, rtmps_url: str | None, reconnect_on_failure: bool
+    ) -> None:
+        """Send one PUT_STREAMING, degrading gracefully on older aionanit wheels."""
+        if not reconnect_on_failure:
+            try:
+                await self._camera.async_start_streaming(
+                    rtmps_url=rtmps_url, reconnect_on_failure=False
+                )
+                return
+            except TypeError as err:
+                if "reconnect_on_failure" not in str(err):
+                    raise
+                _LOGGER.debug(
+                    "Nanit client does not support best-effort PUT_STREAMING; "
+                    "falling back to default send for camera %s",
+                    self._camera.uid,
+                )
+        try:
+            await self._camera.async_start_streaming(rtmps_url=rtmps_url)
+        except TypeError as err:
+            if "rtmps_url" not in str(err):
+                raise
+            _LOGGER.debug(
+                "Nanit client does not support explicit RTMPS URL reuse; "
+                "falling back to legacy stream start for camera %s",
+                self._camera.uid,
+            )
+            await self._camera.async_start_streaming()
 
     # ------------------------------------------------------------------
     # Snapshot (with caching)

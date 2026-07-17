@@ -923,7 +923,11 @@ async def test_camera_keepalive_resends_put_streaming_for_watched_stream(
         entity._handle_stream_keepalive()
         await hass.async_block_till_done()
 
-    camera.async_start_streaming.assert_awaited_once_with(rtmps_url="rtmps://cached-url")
+    # The send must be best-effort — a forced control-session reconnect on a
+    # late ACK would itself kill the RTMPS push the keepalive protects.
+    camera.async_start_streaming.assert_awaited_once_with(
+        rtmps_url="rtmps://cached-url", reconnect_on_failure=False
+    )
     # The keepalive must reschedule itself for the next interval.
     mock_call_later.assert_called_once()
     assert mock_call_later.call_args.args[1] == 5 * 60
@@ -1002,7 +1006,9 @@ async def test_camera_reconnect_resumes_watched_stream_push(
     entity._handle_coordinator_update()  # RECONNECTING -> CONNECTED
     await hass.async_block_till_done()
 
-    camera.async_start_streaming.assert_awaited_once_with(rtmps_url="rtmps://cached-url")
+    camera.async_start_streaming.assert_awaited_once_with(
+        rtmps_url="rtmps://cached-url", reconnect_on_failure=False
+    )
     # Cancel the rescheduled keepalive timer for teardown.
     entity._cancel_stream_timers()
 
@@ -1088,6 +1094,49 @@ async def test_camera_start_streaming_safe_falls_back_for_legacy_client_signatur
 
     assert await entity._async_start_streaming_safe("rtmps://stream-url") is True
     assert calls == [{"rtmps_url": "rtmps://stream-url"}, {}]
+
+
+async def test_camera_start_streaming_safe_falls_back_when_wheel_lacks_best_effort() -> None:
+    """A wheel without reconnect_on_failure gets the default (destructive) send."""
+    coordinator = _push_coordinator(_camera_state(sleep_mode=False))
+    camera = MagicMock(uid="cam_1")
+    calls: list[dict[str, Any]] = []
+
+    async def async_start_streaming(**kwargs: Any) -> None:
+        calls.append(kwargs)
+        if "reconnect_on_failure" in kwargs:
+            raise TypeError(
+                "NanitCamera.async_start_streaming() got an unexpected "
+                "keyword argument 'reconnect_on_failure'"
+            )
+
+    camera.async_start_streaming = AsyncMock(side_effect=async_start_streaming)
+    entity = NanitCameraEntity(coordinator, camera)
+
+    result = await entity._async_start_streaming_safe(
+        "rtmps://stream-url", reconnect_on_failure=False
+    )
+
+    assert result is True
+    assert calls == [
+        {"rtmps_url": "rtmps://stream-url", "reconnect_on_failure": False},
+        {"rtmps_url": "rtmps://stream-url"},
+    ]
+
+
+async def test_camera_start_streaming_safe_best_effort_passes_flag_through() -> None:
+    coordinator = _push_coordinator(_camera_state(sleep_mode=False))
+    camera = MagicMock(uid="cam_1")
+    camera.async_start_streaming = AsyncMock()
+    entity = NanitCameraEntity(coordinator, camera)
+
+    assert (
+        await entity._async_start_streaming_safe("rtmps://stream-url", reconnect_on_failure=False)
+        is True
+    )
+    camera.async_start_streaming.assert_awaited_once_with(
+        rtmps_url="rtmps://stream-url", reconnect_on_failure=False
+    )
 
 
 async def test_camera_start_streaming_safe_does_not_restart_shared_camera() -> None:

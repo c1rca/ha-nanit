@@ -486,8 +486,20 @@ class NanitCamera:
         )
         return f"rtmps://media-secured.nanit.com/nanit/{self._baby_uid}.{token}"
 
-    async def async_start_streaming(self, *, rtmps_url: str | None = None) -> None:
-        """Send PUT_STREAMING with status=STARTED to camera."""
+    async def async_start_streaming(
+        self,
+        *,
+        rtmps_url: str | None = None,
+        reconnect_on_failure: bool = True,
+    ) -> None:
+        """Send PUT_STREAMING with status=STARTED to camera.
+
+        With ``reconnect_on_failure=False`` the send is best-effort: a late
+        or lost ACK raises instead of force-reconnecting the control
+        WebSocket. Background keepalives need this because a control-session
+        reconnect itself stops the camera's RTMPS push — the exact failure a
+        keepalive exists to prevent.
+        """
         if rtmps_url is None:
             rtmps_url = await self.async_get_stream_rtmps_url()
         streaming = Streaming(
@@ -504,6 +516,7 @@ class NanitCamera:
             await self._send_request(
                 RequestType.PUT_STREAMING,
                 streaming=streaming,
+                reconnect_on_failure=reconnect_on_failure,
             )
         except (NanitRequestTimeout, NanitTransportError, NanitCameraUnavailable) as err:
             _LOGGER.warning(

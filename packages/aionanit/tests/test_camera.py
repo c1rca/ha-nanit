@@ -50,6 +50,9 @@ from aionanit.proto import (
     SettingsWifiBand,
     Status,
     StatusConnectionToServer,
+    StreamIdentifier,
+    Streaming,
+    StreamingStatus,
 )
 from aionanit.proto import (
     SensorType as ProtoSensorType,
@@ -1093,6 +1096,53 @@ class TestTimeoutForceReconnect:
             )
 
         cam._async_reconnect.assert_awaited_once_with(force=True)
+
+    async def test_best_effort_timeout_does_not_reconnect(self) -> None:
+        """reconnect_on_failure=False must never tear down the control session.
+
+        Keepalive PUT_STREAMING uses this: a forced reconnect stops the
+        camera's RTMPS push — the exact failure the keepalive exists to
+        prevent — so a late ACK must surface as a timeout, not trigger
+        reconnect-and-retry.
+        """
+        cam, *_ = _make_camera()
+
+        cam._transport = MagicMock()
+        cam._transport.connected = True
+        cam._transport.idle_seconds = 1.0
+        cam._transport.async_send = AsyncMock()
+        cam._async_reconnect = AsyncMock()
+
+        with pytest.raises(NanitRequestTimeout):
+            await cam._send_request(
+                RequestType.PUT_STREAMING,
+                timeout=0.01,
+                reconnect_on_failure=False,
+                streaming=Streaming(
+                    id=StreamIdentifier.MOBILE,
+                    status=StreamingStatus.STARTED,
+                    rtmp_url="rtmps://media-secured.nanit.com/nanit/baby.token",
+                ),
+            )
+
+        cam._async_reconnect.assert_not_awaited()
+        cam._transport.async_send.assert_awaited_once()
+
+    async def test_start_streaming_passes_reconnect_flag_through(self) -> None:
+        """async_start_streaming forwards reconnect_on_failure to _send_request."""
+        cam, *_ = _make_camera()
+        cam._send_request = AsyncMock()
+
+        await cam.async_start_streaming(
+            rtmps_url="rtmps://media-secured.nanit.com/nanit/baby.token",
+            reconnect_on_failure=False,
+        )
+        assert cam._send_request.await_args.kwargs["reconnect_on_failure"] is False
+
+        await cam.async_start_streaming(
+            rtmps_url="rtmps://media-secured.nanit.com/nanit/baby.token",
+        )
+        assert cam._send_request.await_args.kwargs["reconnect_on_failure"] is True
 
     async def test_timeout_calls_reconnect_before_retry(self) -> None:
         """Request timeout triggers _async_reconnect, then retries."""
